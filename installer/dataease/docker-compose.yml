@@ -1,0 +1,35 @@
+version: '2.1'
+services:
+
+  dataease:
+    image: registry.cn-qingdao.aliyuncs.com/dataease/dataease:DE_TAG
+    container_name: dataease
+    ports:
+      - ${DE_PORT}:8081
+    mem_limit: 4096m
+    volumes:
+      - ${DE_BASE}/dataease/conf:/BITools/Server/resource/conf
+      - ${DE_BASE}/dataease/logs:/BITools/Server/resource/logs
+      - ${DE_BASE}/dataease/plugins/thirdpart:/BITools/Server/resource/plugins/thirdpart
+      - ${DE_BASE}/dataease/data/kettle:/BITools/Server/resource/data/kettle
+      - ${DE_BASE}/dataease/data/static-resource:/BITools/Server/resource/data/static-resource
+      - ${DE_BASE}/dataease/custom-drivers:/BITools/Server/resource/custom-drivers
+      - ${DE_BASE}/dataease/data/custom:/BITools/Server/resource/data/custom
+      - ${DE_BASE}/dataease/data/exportData:/BITools/Server/resource/data/exportData
+      - ${DE_BASE}/dataease/data/business:/BITools/Server/resource/data/business
+      - ${DE_BASE}/dataease/data/ehcache:/BITools/Server/resource/data/ehcache
+    shm_size: 1gb
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - dataease-network
+
+networks:
+  dataease-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${DE_DOCKER_SUBNET}
+          gateway: ${DE_DOCKER_GATEWAY}
