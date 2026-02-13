@@ -1017,6 +1017,16 @@ public class DataSetTableService {
     }
 
 
+    /**
+     * 检查SQL中的变量是否有效
+     * 通过尝试移除SQL中的变量来验证变量的位置和格式是否正确
+     * 如果移除后仍包含占位符，说明变量位置无效或格式不正确
+     *
+     * @param sql 待检查的原始SQL语句
+     * @param dsType 数据源类型（如mysql、oracle、pg等）
+     * @throws Exception 当SQL中存在无效的变量位置或格式时抛出异常，
+     *                   异常消息为国际化key "I18N_SQL_variable_limit"
+     */
     public void checkVariable(final String sql, String dsType) throws Exception {
         String tmpSql = removeVariables(sql, dsType);
         if (tmpSql.contains(SubstitutedParams)) {
@@ -1024,6 +1034,17 @@ public class DataSetTableService {
         }
     }
 
+    /**
+     * 处理SQL变量默认值
+     * 根据变量详情配置，将SQL中的变量替换为对应的默认值
+     * 支持不同作用域的变量默认值（全局范围等）
+     *
+     * @param sql 包含变量的原始SQL语句
+     * @param sqlVariableDetails SQL变量详情的JSON字符串，包含变量配置和默认值信息
+     * @param dsType 数据源类型（如mysql、oracle、pg等）
+     * @param isEdit 是否处于编辑模式，true表示编辑模式，false表示非编辑模式
+     * @return 处理后的SQL语句，变量已替换为默认值
+     */
     public String handleVariableDefaultValue(String sql, String sqlVariableDetails, String dsType, boolean isEdit) {
         if (StringUtils.isEmpty(sql)) {
             DataEaseException.throwException(Translator.get("i18n_sql_not_empty"));
@@ -1058,6 +1079,16 @@ public class DataSetTableService {
         return sql;
     }
 
+    /**
+     * 移除SQL中的变量
+     * 将SQL中的变量格式 ${变量名} 替换为占位符 SubstitutedParams
+     * 处理包含子查询、JOIN、WHERE等复杂SQL语句中的变量
+     *
+     * @param sql 包含变量的原始SQL语句
+     * @param dsType 数据源类型（如mysql、oracle、pg等）
+     * @return 处理后的SQL语句，变量被替换为占位符
+     * @throws Exception 当SQL解析失败时抛出异常
+     */
     public String removeVariables(final String sql, String dsType) throws Exception {
         String tmpSql = sql.replaceAll("(?m)^\\s*$[\n\r]{0,}", "");
         Pattern pattern = Pattern.compile(regex);
@@ -1068,6 +1099,11 @@ public class DataSetTableService {
             tmpSql = tmpSql.replace(matcher.group(), SubstitutedParams);
         }
         if (!hasVariables && !tmpSql.contains(SubstitutedParams)) {
+            return tmpSql;
+        }
+
+        // 如果是存储过程调用，直接返回（存储过程调用不需要JSQLParser解析）
+        if (isStoredProcedureCall(tmpSql, dsType)) {
             return tmpSql;
         }
 
@@ -1255,6 +1291,14 @@ public class DataSetTableService {
         return datasetSqlLogMapper.selectByExample(example);
     }
 
+    /**
+     * 获取SQL预览数据
+     *
+     * @param dataSetTableRequest 数据集表请求对象，包含数据集配置信息
+     * @param realData 是否获取真实数据，true表示使用真实数据，false表示使用虚拟数据
+     * @return ResultHolder 包含字段列表、数据列表和SQL日志的预览结果
+     * @throws Exception 当SQL执行失败、数据源无效或变量处理异常时抛出异常
+     */
     public ResultHolder getSQLPreview(DataSetTableRequest dataSetTableRequest, boolean realData) throws Exception {
         DatasetSqlLog datasetSqlLog = new DatasetSqlLog();
 
@@ -1269,11 +1313,14 @@ public class DataSetTableService {
         if (!realData) {
             tmpSql.replaceAll(SubstitutedSql, SubstitutedSqlVirtualData);
         }
-        if (dataSetTableRequest.getMode() == 1 && (tmpSql.contains(SubstitutedParams) || tmpSql.contains(SubstitutedSql.trim()))) {
-            throw new Exception(Translator.get("I18N_SQL_variable_direct_limit"));
-        }
-        if (tmpSql.contains(SubstitutedParams)) {
-            throw new Exception(Translator.get("I18N_SQL_variable_limit"));
+        // 检测是否是存储过程调用，如果是则跳过变量位置校验
+        if (!isStoredProcedureCall(sql, ds.getType())) {
+            if (dataSetTableRequest.getMode() == 1 && (tmpSql.contains(SubstitutedParams) || tmpSql.contains(SubstitutedSql.trim()))) {
+                throw new Exception(Translator.get("I18N_SQL_variable_direct_limit"));
+            }
+            if (tmpSql.contains(SubstitutedParams)) {
+                throw new Exception(Translator.get("I18N_SQL_variable_limit"));
+            }
         }
         Provider datasourceProvider = ProviderFactory.getProvider(ds.getType());
         DatasourceRequest datasourceRequest = new DatasourceRequest();
@@ -1285,7 +1332,16 @@ public class DataSetTableService {
         }
         checkVariable(sql, ds.getType());
         QueryProvider qp = ProviderFactory.getQueryProvider(ds.getType());
-        String sqlAsTable = qp.createSQLPreview(sql, null);
+
+        // 检测是否是存储过程调用，如果是则直接执行原始SQL，不通过createSQLPreview包装
+        String sqlAsTable;
+        if (isStoredProcedureCall(sql, ds.getType())) {
+            // 存储过程调用：直接使用原始SQL
+            sqlAsTable = sql;
+        } else {
+            // 普通查询：使用createSQLPreview包装
+            sqlAsTable = qp.createSQLPreview(sql, null);
+        }
         datasourceRequest.setQuery(sqlAsTable);
         Map<String, List> result;
         try {
@@ -1335,6 +1391,48 @@ public class DataSetTableService {
         map.put("log", datasetSqlLog);
 
         return ResultHolder.success(map);
+    }
+
+    /**
+     * 检测SQL是否是存储过程调用语句
+     * 支持 MySQL、PostgreSQL、SQL Server、Oracle 的存储过程调用语法
+     *
+     * @param sql SQL语句
+     * @param datasourceType 数据源类型
+     * @return true 如果是存储过程调用，false 否则
+     */
+    private boolean isStoredProcedureCall(String sql, String datasourceType) {
+        if (StringUtils.isEmpty(sql) || StringUtils.isEmpty(datasourceType)) {
+            return false;
+        }
+
+        String trimmedSql = sql.trim().toUpperCase();
+
+        // MySQL: CALL 存储过程名(参数1, 参数2, ...);
+        if ("mysql".equalsIgnoreCase(datasourceType)) {
+            return trimmedSql.matches("CALL\\s+[\\w.]+\\s*\\(.*\\).*");
+        }
+
+        // PostgreSQL: SELECT * FROM 存储过程名(参数1, 参数2, ...);
+        if ("pg".equalsIgnoreCase(datasourceType)) {
+            // 检测是否是 SELECT * FROM function_name(...) 格式
+            return trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
+        }
+
+        // SQL Server: EXEC 存储过程名 参数1, 参数2, ...;
+        if ("sqlServer".equalsIgnoreCase(datasourceType)) {
+            // 支持 EXEC 或 EXECUTE
+            return trimmedSql.matches("EXEC(?:UTE)?\\s+[\\w.]+(?:\\s+[^,\\s]+(?:\\s*,\\s*[^,\\s]+)*)?.*");
+        }
+
+        // Oracle: EXEC 存储过程名(参数1, 参数2, ...);
+        if ("oracle".equalsIgnoreCase(datasourceType)) {
+            // Oracle 支持 EXEC 或 EXECUTE，参数通常用括号括起来
+            return trimmedSql.matches("EXEC(?:UTE)?\\s+[\\w.]+\\s*\\(.*\\).*");
+        }
+
+        // 其他数据库类型不处理存储过程调用
+        return false;
     }
 
     public Map<String, Object> getUnionPreview(DataSetTableRequest dataSetTableRequest) throws Exception {
@@ -2645,8 +2743,13 @@ public class DataSetTableService {
         }
     }
 
-    /*
-     * 判断数组中是否有重复的值
+    /**
+     * 检查数组中是否存在重复值或空值
+     * 用于验证Excel导入或字段配置时，确保字段名称不重复且不为空
+     *
+     * @param array 待检查的字符串数组，通常为字段名称数组
+     * @throws RuntimeException 当数组中存在空字符串时抛出异常，异常消息为国际化key "i18n_excel_empty_column"
+     * @throws DataEaseException 当数组中存在重复值时抛出异常，异常消息包含重复值的列表，使用国际化key "i18n_excel_field_repeat"
      */
     public static void checkIsRepeat(String[] array) {
         HashSet<String> hashSet = new HashSet<>();
