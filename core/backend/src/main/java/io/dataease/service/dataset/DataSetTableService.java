@@ -1029,8 +1029,11 @@ public class DataSetTableService {
      */
     public void checkVariable(final String sql, String dsType) throws Exception {
         String tmpSql = removeVariables(sql, dsType);
-        if (tmpSql.contains(SubstitutedParams)) {
-            throw new Exception(Translator.get("I18N_SQL_variable_limit"));
+        // 如果是存储过程调用，跳过变量位置校验（存储过程的参数中可以包含变量）
+        if (!isStoredProcedureCall(sql, dsType)) {
+            if (tmpSql.contains(SubstitutedParams)) {
+                throw new Exception(Translator.get("I18N_SQL_variable_limit"));
+            }
         }
     }
 
