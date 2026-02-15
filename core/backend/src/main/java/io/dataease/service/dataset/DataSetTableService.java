@@ -696,30 +696,67 @@ public class DataSetTableService {
                 datasourceRequest.setDatasource(ds);
                 DataTableInfoDTO dataTableInfo = new Gson().fromJson(datasetTable.getInfo(), DataTableInfoDTO.class);
                 String sql = dataTableInfo.isBase64Encryption() ? new String(java.util.Base64.getDecoder().decode(dataTableInfo.getSql())) : dataTableInfo.getSql();
-                sql = handleVariableDefaultValue(sql, datasetTable.getSqlVariableDetails(), ds.getType(), false);
-                QueryProvider qp = ProviderFactory.getQueryProvider(ds.getType());
-                datasourceRequest.setQuery(qp.createQuerySQLWithPage(sql, fields, page, pageSize, realSize, false, null, rowPermissionsTree));
-                map.put("sql", java.util.Base64.getEncoder().encodeToString(datasourceRequest.getQuery().getBytes()));
-                datasourceRequest.setPage(page);
-                datasourceRequest.setFetchSize(Integer.parseInt(dataSetTableRequest.getRow()));
-                datasourceRequest.setPageSize(pageSize);
-                datasourceRequest.setRealSize(realSize);
-                datasourceRequest.setPreviewData(true);
-                try {
-                    datasourceRequest.setPageable(true);
-                    datasourceRequest.setPermissionFields(fields);
-                    data.addAll(datasourceProvider.getData(datasourceRequest));
-                } catch (Exception e) {
-                    logger.error(e.getMessage());
-                    DataEaseException.throwException(Translator.get("i18n_ds_error") + "->" + e.getMessage());
-                }
-                try {
-                    datasourceRequest.setPageable(false);
-                    datasourceRequest.setQuery(qp.createQuerySqlWithLimit(sql, fields, Integer.valueOf(dataSetTableRequest.getRow()), false, null, rowPermissionsTree));
-                    dataSetPreviewPage.setTotal(datasourceProvider.getData(datasourceRequest).size());
-                } catch (Exception e) {
-                    logger.error(e.getMessage());
-                    DataEaseException.throwException(Translator.get("i18n_ds_error") + "->" + e.getMessage());
+
+                // 检测是否是存储过程调用，如果是则直接执行原始SQL，不通过QueryProvider包装
+                if (isStoredProcedureCall(sql, ds.getType())) {
+                    // 存储过程变量取真实数据
+                    sql = handleVariableDefaultValue(sql, datasetTable.getSqlVariableDetails(), ds.getType(), true);
+
+                    // 存储过程调用：直接使用原始SQL，在Java中实现分页
+                    datasourceRequest.setQuery(sql);
+                    map.put("sql", java.util.Base64.getEncoder().encodeToString(sql.getBytes()));
+                    datasourceRequest.setPage(1);
+                    datasourceRequest.setFetchSize(Integer.parseInt(dataSetTableRequest.getRow()));
+                    datasourceRequest.setPreviewData(true);
+                    try {
+                        datasourceRequest.setPageable(false);
+                        datasourceRequest.setPermissionFields(fields);
+                        List<String[]> allData = datasourceProvider.getData(datasourceRequest);
+
+                        // 计算总记录数
+                        int totalRecords = allData.size();
+                        dataSetPreviewPage.setTotal(totalRecords);
+
+                        // 在Java中实现分页
+                        int startIndex = (page - 1) * pageSize;
+                        int endIndex = Math.min(startIndex + pageSize, totalRecords);
+
+                        if (startIndex < totalRecords && startIndex < allData.size()) {
+                            List<String[]> pageData = allData.subList(startIndex, endIndex);
+                            data.addAll(pageData);
+                        }
+                    } catch (Exception e) {
+                        logger.error(e.getMessage());
+                        DataEaseException.throwException(Translator.get("i18n_ds_error") + "->" + e.getMessage());
+                    }
+                } else {
+                    sql = handleVariableDefaultValue(sql, datasetTable.getSqlVariableDetails(), ds.getType(), false);
+                    QueryProvider qp = ProviderFactory.getQueryProvider(ds.getType());
+
+                    // 普通查询：使用QueryProvider包装的SQL
+                    datasourceRequest.setQuery(qp.createQuerySQLWithPage(sql, fields, page, pageSize, realSize, false, null, rowPermissionsTree));
+                    map.put("sql", java.util.Base64.getEncoder().encodeToString(datasourceRequest.getQuery().getBytes()));
+                    datasourceRequest.setPage(page);
+                    datasourceRequest.setFetchSize(Integer.parseInt(dataSetTableRequest.getRow()));
+                    datasourceRequest.setPageSize(pageSize);
+                    datasourceRequest.setRealSize(realSize);
+                    datasourceRequest.setPreviewData(true);
+                    try {
+                        datasourceRequest.setPageable(true);
+                        datasourceRequest.setPermissionFields(fields);
+                        data.addAll(datasourceProvider.getData(datasourceRequest));
+                    } catch (Exception e) {
+                        logger.error(e.getMessage());
+                        DataEaseException.throwException(Translator.get("i18n_ds_error") + "->" + e.getMessage());
+                    }
+                    try {
+                        datasourceRequest.setPageable(false);
+                        datasourceRequest.setQuery(qp.createQuerySqlWithLimit(sql, fields, Integer.valueOf(dataSetTableRequest.getRow()), false, null, rowPermissionsTree));
+                        dataSetPreviewPage.setTotal(datasourceProvider.getData(datasourceRequest).size());
+                    } catch (Exception e) {
+                        logger.error(e.getMessage());
+                        DataEaseException.throwException(Translator.get("i18n_ds_error") + "->" + e.getMessage());
+                    }
                 }
             } else {
                 // check doris table
@@ -1324,6 +1361,9 @@ public class DataSetTableService {
             if (tmpSql.contains(SubstitutedParams)) {
                 throw new Exception(Translator.get("I18N_SQL_variable_limit"));
             }
+        }else {
+            // 存储过程调用：变量获取真实数据
+            realData = true;
         }
         Provider datasourceProvider = ProviderFactory.getProvider(ds.getType());
         DatasourceRequest datasourceRequest = new DatasourceRequest();
@@ -1369,6 +1409,11 @@ public class DataSetTableService {
         String[] fieldArray = fields.stream().map(TableField::getFieldName).toArray(String[]::new);
         checkIsRepeat(fieldArray);
 
+        // 如果是存储过程调用，限制只返回前1000行数据
+        if (isStoredProcedureCall(sql, ds.getType()) && CollectionUtils.isNotEmpty(data) && data.size() > 1000) {
+            data = data.subList(0, 1000);
+        }
+
         if (!realData && dataTableInfo.isSetKey()) {
             for (String key : dataTableInfo.getKeys()) {
                 if (!fields.stream().map(TableField::getFieldName).collect(Collectors.toList()).contains(key)) {
@@ -1404,7 +1449,7 @@ public class DataSetTableService {
      * @param datasourceType 数据源类型
      * @return true 如果是存储过程调用，false 否则
      */
-    private boolean isStoredProcedureCall(String sql, String datasourceType) {
+    public boolean isStoredProcedureCall(String sql, String datasourceType) {
         if (StringUtils.isEmpty(sql) || StringUtils.isEmpty(datasourceType)) {
             return false;
         }
@@ -1982,8 +2027,19 @@ public class DataSetTableService {
             QueryProvider qp = ProviderFactory.getQueryProvider(ds.getType());
             DataTableInfoDTO dataTableInfo = new Gson().fromJson(datasetTable.getInfo(), DataTableInfoDTO.class);
             String sql = dataTableInfo.isBase64Encryption() ? new String(java.util.Base64.getDecoder().decode(dataTableInfo.getSql())) : dataTableInfo.getSql();
-            sql = removeVariables(sql, ds.getType()).replaceAll(SubstitutedSql.trim(), SubstitutedSqlVirtualData);
-            String sqlAsTable = qp.createSQLPreview(sql, null);
+
+            // 检测是否是存储过程调用，如果是则直接执行原始SQL，不通过createSQLPreview包装
+            String sqlAsTable;
+            if (isStoredProcedureCall(sql, ds.getType())) {
+                // 存储过程调用：直接使用原始SQL，SQL中的参数设置为真实参数
+                sql = handleVariableDefaultValue(sql, dataSetTableRequest.getSqlVariableDetails(), ds.getType(), true);
+                sqlAsTable = sql;
+            } else {
+
+                sql = removeVariables(sql, ds.getType()).replaceAll(SubstitutedSql.trim(), SubstitutedSqlVirtualData);
+                // 普通查询：使用createSQLPreview包装
+                sqlAsTable = qp.createSQLPreview(sql, null);
+            }
             datasourceRequest.setQuery(sqlAsTable);
             fields = datasourceProvider.fetchResultField(datasourceRequest);
         } else if (StringUtils.equalsIgnoreCase(datasetTable.getType(), DatasetType.EXCEL.name())) {

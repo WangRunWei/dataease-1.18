@@ -60,6 +60,8 @@ public class DirectFieldService implements DataSetFieldService {
     @Resource
     private AuthUserService authUserService;
 
+    private static final String SubstitutedParams = "'DATAEASE_PATAMS_BI'";
+
     @Override
     public List<Object> fieldValues(String fieldId, Long userId, Boolean userPermissions, Boolean rowAndColumnMgm) throws Exception {
         List<String> fieldIds = new ArrayList<>();
@@ -164,6 +166,7 @@ public class DirectFieldService implements DataSetFieldService {
         DatasourceRequest datasourceRequest = new DatasourceRequest();
         Provider datasourceProvider = null;
         String createSQL = null;
+        String datasourceType = null; // 保存数据源类型，用于后续判断是否是存储过程
         Long calcLimit = needMapping ? null : 100000L;
         if (datasetTable.getMode() == 0) {// 直连
             if (StringUtils.isEmpty(datasetTable.getDataSourceId())) return null;
@@ -171,6 +174,7 @@ public class DirectFieldService implements DataSetFieldService {
             if (StringUtils.isNotEmpty(ds.getStatus()) && ds.getStatus().equalsIgnoreCase("Error")) {
                 throw new Exception(Translator.get("i18n_invalid_ds"));
             }
+            datasourceType = ds.getType(); // 保存数据源类型，用于后续判断是否是存储过程
             datasourceProvider = ProviderFactory.getProvider(ds.getType());
             datasourceRequest = new DatasourceRequest();
             datasourceRequest.setDatasource(ds);
@@ -184,8 +188,16 @@ public class DirectFieldService implements DataSetFieldService {
                 if (dataTableInfoDTO.isBase64Encryption()) {
                     sql = new String(java.util.Base64.getDecoder().decode(sql));
                 }
+
                 sql = dataSetTableService.handleVariableDefaultValue(sql, null, ds.getType(), false);
-                createSQL = qp.createQuerySQLAsTmp(sql, permissionFields, !needSort, customFilter, rowPermissionsTree, deSortFields, calcLimit, keyword);
+                // 检测是否是存储过程调用
+                if (dataSetTableService.isStoredProcedureCall(sql, ds.getType())) {
+                    // 对于存储过程，直接使用SQL，不需要包装为临时表查询, 将存储过程参数替换为null
+                    createSQL = sql.replace(SubstitutedParams, "null");
+                } else {
+                    // 普通查询SQL：使用createSQLAsTmp包装
+                    createSQL = qp.createQuerySQLAsTmp(sql, permissionFields, !needSort, customFilter, rowPermissionsTree, deSortFields, calcLimit, keyword);
+                }
             } else if (StringUtils.equalsIgnoreCase(datasetTable.getType(), DatasetType.CUSTOM.toString())) {
                 DataTableInfoDTO dt = new Gson().fromJson(datasetTable.getInfo(), DataTableInfoDTO.class);
                 List<DataSetTableUnionDTO> listUnion = dataSetTableUnionService.listByTableId(dt.getList().get(0).getTableId());
@@ -231,8 +243,28 @@ public class DirectFieldService implements DataSetFieldService {
         datasourceRequest.setPermissionFields(permissionFields);
         assert datasourceProvider != null;
         List<String[]> rows = datasourceProvider.getData(datasourceRequest);
+
+        // 如果不需要映射，直接返回字段值列表
         if (!needMapping) {
-            return rows.stream().map(row -> row[0]).distinct().limit(1000L).collect(Collectors.toList());
+            // 判断是否是直连模式的存储过程调用
+            boolean isStoredProcedure = datasetTable.getMode() == 0
+                    && StringUtils.isNotEmpty(datasourceType)
+                    && dataSetTableService.isStoredProcedureCall(createSQL, datasourceType);
+
+            // 确定要返回的列索引
+            int columnIndex = 0; // 默认返回第一列
+            if (isStoredProcedure && CollectionUtils.isNotEmpty(permissionFields)) {
+                // 存储过程：根据字段的 columnIndex 返回对应列
+                columnIndex = permissionFields.get(0).getColumnIndex();
+            }
+
+            // 返回指定列的值，去重并限制1000条
+            final int finalColumnIndex = columnIndex;
+            return rows.stream()
+                    .map(row -> row[finalColumnIndex])
+                    .distinct()
+                    .limit(1000L)
+                    .collect(Collectors.toList());
         }
         Set<String> pkSet = new HashSet<>();
         if (CollectionUtils.isNotEmpty(rows) && existExtSortField && originSize > 0) {

@@ -137,6 +137,8 @@ public class ChartViewService {
 
     private static final String START_END_SEPARATOR = "_START_END_SPLIT";
 
+    private static final String SubstitutedParams = "'DATAEASE_PATAMS_BI'";
+
 
     //默认使用非公平
     private ReentrantLock lock = new ReentrantLock();
@@ -1228,6 +1230,7 @@ public class ChartViewService {
         long totalPage = 0l;
         long totalItems = 0l;
         String totalPageSql = null;
+        boolean isStoredProcedure = false;
         PageInfo pageInfo = new PageInfo();
         pageInfo.setGoPage(chartExtRequest.getGoPage());
         if (StringUtils.equalsIgnoreCase(view.getResultMode(), "custom")) {
@@ -1295,43 +1298,54 @@ public class ChartViewService {
             } else if (StringUtils.equalsIgnoreCase(table.getType(), DatasetType.SQL.name())) {
                 String sql = dataTableInfoDTO.isBase64Encryption() ? new String(java.util.Base64.getDecoder().decode(dataTableInfoDTO.getSql()), StandardCharsets.UTF_8) : dataTableInfoDTO.getSql();
                 sql = handleVariable(sql, chartExtRequest, qp, table, ds);
-                if (StringUtils.equalsAnyIgnoreCase(view.getType(), "gauge", "liquid")) {
-                    querySql = qp.getSQLSummaryAsTmp(sql, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, view);
-                    if (isYOY) {
-                        yoySql = qp.getSQLSummaryAsTmp(sql, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, view);
-                    }
-                } else if (StringUtils.containsIgnoreCase(view.getType(), "stack")) {
-                    querySql = qp.getSQLAsTmpStack(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, extStack, view);
-                    if (isYOY) {
-                        yoySql = qp.getSQLAsTmpStack(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, extStack, view);
-                    }
-                } else if (StringUtils.containsIgnoreCase(view.getType(), "scatter")) {
-                    querySql = qp.getSQLAsTmpScatter(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, extBubble, extStack, view);
-                    if (isYOY) {
-                        yoySql = qp.getSQLAsTmpScatter(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, extBubble, extStack, view);
-                    }
-                } else if (StringUtils.equalsIgnoreCase("table-info", view.getType())) {
-                    querySql = qp.getSQLWithPage(false, sql, xAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, ds, view, pageInfo);
-                    totalPageSql = qp.getResultCount(false, sql, xAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, ds, view);
-                } else if (StringUtils.equalsIgnoreCase("bar-time-range", view.getType())) {
 
-                    querySql = qp.getSQLAsTmpRangeBar(sql, xAxisBase, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, extStack, view);
-                    if (isYOY) {
-                        yoySql = qp.getSQLAsTmpRangeBar(sql, xAxisBase, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, extStack, view);
+
+                // 检测是否是存储过程调用
+                isStoredProcedure = isStoredProcedureCall(sql, ds.getType());
+
+                if (!isStoredProcedure) {
+                    // 普通SELECT查询：使用QueryProvider包装（原有逻辑）
+                    if (StringUtils.equalsAnyIgnoreCase(view.getType(), "gauge", "liquid")) {
+                        querySql = qp.getSQLSummaryAsTmp(sql, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, view);
+                        if (isYOY) {
+                            yoySql = qp.getSQLSummaryAsTmp(sql, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, view);
+                        }
+                    } else if (StringUtils.containsIgnoreCase(view.getType(), "stack")) {
+                        querySql = qp.getSQLAsTmpStack(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, extStack, view);
+                        if (isYOY) {
+                            yoySql = qp.getSQLAsTmpStack(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, extStack, view);
+                        }
+                    } else if (StringUtils.containsIgnoreCase(view.getType(), "scatter")) {
+                        querySql = qp.getSQLAsTmpScatter(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, extBubble, extStack, view);
+                        if (isYOY) {
+                            yoySql = qp.getSQLAsTmpScatter(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, extBubble, extStack, view);
+                        }
+                    } else if (StringUtils.equalsIgnoreCase("table-info", view.getType())) {
+                        querySql = qp.getSQLWithPage(false, sql, xAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, ds, view, pageInfo);
+                        totalPageSql = qp.getResultCount(false, sql, xAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, ds, view);
+                    } else if (StringUtils.equalsIgnoreCase("bar-time-range", view.getType())) {
+
+                        querySql = qp.getSQLAsTmpRangeBar(sql, xAxisBase, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, extStack, view);
+                        if (isYOY) {
+                            yoySql = qp.getSQLAsTmpRangeBar(sql, xAxisBase, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, extStack, view);
+                        }
+                    } else {
+                        querySql = qp.getSQLAsTmp(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, view);
+                        if (containDetailField(view) && CollectionUtils.isNotEmpty(viewFields)) {
+                            detailFieldList.addAll(xAxis);
+                            detailFieldList.addAll(viewFields);
+                            String resultMode = view.getResultMode();
+                            view.setResultMode(null);
+                            detailFieldSql = qp.getSQLWithPage(false, sql, detailFieldList, fieldCustomFilter, rowPermissionsTree, extFilterList, ds, view, pageInfo);
+                            view.setResultMode(resultMode);
+                        }
+                        if (isYOY) {
+                            yoySql = qp.getSQLAsTmp(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, view);
+                        }
                     }
                 } else {
-                    querySql = qp.getSQLAsTmp(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, extFilterList, view);
-                    if (containDetailField(view) && CollectionUtils.isNotEmpty(viewFields)) {
-                        detailFieldList.addAll(xAxis);
-                        detailFieldList.addAll(viewFields);
-                        String resultMode = view.getResultMode();
-                        view.setResultMode(null);
-                        detailFieldSql = qp.getSQLWithPage(false, sql, detailFieldList, fieldCustomFilter, rowPermissionsTree, extFilterList, ds, view, pageInfo);
-                        view.setResultMode(resultMode);
-                    }
-                    if (isYOY) {
-                        yoySql = qp.getSQLAsTmp(sql, xAxis, yAxis, fieldCustomFilter, rowPermissionsTree, yoyFilterList, view);
-                    }
+                    // 存储过程调用：直接使用原始SQL，将参数都替换成空，不通过QueryProvider包装
+                    querySql = sql.replaceAll(SubstitutedParams, "null");
                 }
             } else if (StringUtils.equalsIgnoreCase(table.getType(), DatasetType.CUSTOM.name())) {
                 DataTableInfoDTO dt = gson.fromJson(table.getInfo(), DataTableInfoDTO.class);
@@ -1435,11 +1449,76 @@ public class ChartViewService {
             yAxisForRequest.addAll(yAxis);
             datasourceRequest.setYAxis(yAxisForRequest);
             datasourceRequest.setTotalPageFlag(false);
+
             data = datasourceProvider.getData(datasourceRequest);
-            if (CollectionUtils.isNotEmpty(assistFields)) {
+
+            // 对存储过程的查询结果进行分页处理（存储过程在 SQL 层无法分页，需要在 Java 层分页）
+            if (isStoredProcedure && StringUtils.equalsIgnoreCase(table.getType(), DatasetType.SQL.name())) {
+                List<ChartViewFieldDTO> axis = new ArrayList<>();
+                axis.addAll(xAxis);
+                axis.addAll(yAxis);
+
+                // 调用存储过程排序方法
+                sortStoredProcedureData(data, axis);
+
+                // 根据resultCount限制返回的数据条数
+                Integer resultCount = view.getResultCount();
+                if (resultCount != null && resultCount > 0 && data.size() > resultCount) {
+                    data = data.subList(0, resultCount);
+                }
+
+                List<Integer> columnIndexList = axis.stream()
+                        .map(ChartViewFieldDTO::getColumnIndex)
+                        .collect(Collectors.toList());
+
+                // 根据 columnIndexList 对 data 进行列重排序
+                if (CollectionUtils.isNotEmpty(columnIndexList)) {
+                    List<String[]> reorderedData = new ArrayList<>();
+                    for (String[] row : data) {
+                        String[] newRow = new String[columnIndexList.size()];
+                        for (int i = 0; i < columnIndexList.size(); i++) {
+                            Integer originalIndex = columnIndexList.get(i);
+                            if (originalIndex != null && originalIndex < row.length) {
+                                newRow[i] = row[originalIndex];
+                            }
+                        }
+                        reorderedData.add(newRow);
+                    }
+                    data = reorderedData;
+                }
+
+                Long goPage = chartExtRequest.getGoPage();
+                Long pageSize = chartExtRequest.getPageSize();
+                if (goPage != null && pageSize != null && data.size() > pageSize) {
+                    // 计算总页数和总记录数
+                    totalPage = (data.size() / pageSize) + (data.size() % pageSize > 0 ? 1 : 0);
+                    totalItems = data.size();
+
+                    int startIndex = (int) ((goPage - 1) * pageSize);
+                    int endIndex = (int) Math.min(startIndex + pageSize, data.size());
+                    if (startIndex < data.size()) {
+                        data = data.subList(startIndex, endIndex);
+                    }
+                }
+            }
+
+             if (CollectionUtils.isNotEmpty(assistFields)) {
                 datasourceAssistRequest.setQuery(assistSQL(datasourceRequest.getQuery(), assistFields, ds));
                 logger.info(datasourceAssistRequest.getQuery());
                 assistData = datasourceProvider.getData(datasourceAssistRequest);
+
+                // 对存储过程的辅助线数据也进行分页处理
+                if (isStoredProcedure && StringUtils.equalsIgnoreCase(table.getType(), DatasetType.SQL.name())) {
+                    Long goPage = chartExtRequest.getGoPage();
+                    Long pageSize = chartExtRequest.getPageSize();
+                    if (goPage != null && pageSize != null && assistData.size() > pageSize) {
+                        int startIndex = (int) ((goPage - 1) * pageSize);
+                        int endIndex = (int) Math.min(startIndex + pageSize, assistData.size());
+                        if (startIndex < assistData.size()) {
+                            assistData = assistData.subList(startIndex, endIndex);
+                        }
+                    }
+                }
             }
 
             if (StringUtils.isNotBlank(detailFieldSql)) {
@@ -2828,5 +2907,130 @@ public class ChartViewService {
         List<String[]> sqlData = sqlData(view, requestList, cache, fieldId);
         List<String[]> result = customSort(Optional.ofNullable(targetField.getCustomSort()).orElse(new ArrayList<>()), sqlData, 0);
         return result.stream().map(i -> i[0]).distinct().collect(Collectors.toList());
+    }
+
+    /**
+     * 对存储过程查询结果进行排序
+     * 根据 ChartViewFieldDTO 中的 columnIndex 和 sort 字段对数据进行排序
+     *
+     * @param data 待排序的数据
+     * @param axis 包含排序信息的字段列表
+     */
+    private void sortStoredProcedureData(List<String[]> data, List<ChartViewFieldDTO> axis) {
+        if (CollectionUtils.isEmpty(data) || CollectionUtils.isEmpty(axis)) {
+            return;
+        }
+
+        for (int i = axis.size() - 1; i >= 0; i--) {
+            ChartViewFieldDTO chartViewFieldDTO = axis.get(i);
+            Integer columnIndex = chartViewFieldDTO.getColumnIndex();
+            String sort = chartViewFieldDTO.getSort();
+
+            // 明确判断：只处理 "asc"（升序）或 "desc"（降序），"none" 或其他值不进行排序
+            if (columnIndex != null && columnIndex >= 0 && StringUtils.equalsIgnoreCase(sort, "asc")) {
+                final int sortColumnIndex = columnIndex;
+
+                // 升序排序
+                data.sort((row1, row2) -> {
+                    // 安全获取值，null或越界时返回空字符串
+                    String val1 = (row1 != null && sortColumnIndex < row1.length && row1[sortColumnIndex] != null)
+                            ? row1[sortColumnIndex].trim() : "";
+                    String val2 = (row2 != null && sortColumnIndex < row2.length && row2[sortColumnIndex] != null)
+                            ? row2[sortColumnIndex].trim() : "";
+
+                    // 空值统一排在最前面
+                    if (val1.isEmpty() && val2.isEmpty()) return 0;
+                    if (val1.isEmpty()) return -1;
+                    if (val2.isEmpty()) return 1;
+
+                    // 尝试判断是否都是数字
+                    boolean isNum1 = val1.matches("-?\\d+(\\.\\d+)?");
+                    boolean isNum2 = val2.matches("-?\\d+(\\.\\d+)?");
+
+                    // 都是数字时按数字比较
+                    if (isNum1 && isNum2) {
+                        try {
+                            Double num1 = Double.parseDouble(val1);
+                            Double num2 = Double.parseDouble(val2);
+                            return num1.compareTo(num2);
+                        } catch (NumberFormatException e) {
+                            // 解析失败，降级为字符串比较
+                        }
+                    }
+
+                    // 其他情况（都是非数字，或一个是数字一个非数字）统一按字符串比较
+                    return val1.compareTo(val2);
+                });
+
+                // 找到第一个排序字段后就跳出循环
+                break;
+            } else if (columnIndex != null && columnIndex >= 0 && StringUtils.equalsIgnoreCase(sort, "desc")) {
+                final int sortColumnIndex = columnIndex;
+
+                // 降序排序
+                data.sort((row1, row2) -> {
+                    // 安全获取值，null或越界时返回空字符串
+                    String val1 = (row1 != null && sortColumnIndex < row1.length && row1[sortColumnIndex] != null)
+                            ? row1[sortColumnIndex].trim() : "";
+                    String val2 = (row2 != null && sortColumnIndex < row2.length && row2[sortColumnIndex] != null)
+                            ? row2[sortColumnIndex].trim() : "";
+
+                    // 空值统一排在最后面（降序时空值在最后）
+                    if (val1.isEmpty() && val2.isEmpty()) return 0;
+                    if (val1.isEmpty()) return 1;
+                    if (val2.isEmpty()) return -1;
+
+                    // 尝试判断是否都是数字
+                    boolean isNum1 = val1.matches("-?\\d+(\\.\\d+)?");
+                    boolean isNum2 = val2.matches("-?\\d+(\\.\\d+)?");
+
+                    // 都是数字时按数字比较
+                    if (isNum1 && isNum2) {
+                        try {
+                            Double num1 = Double.parseDouble(val1);
+                            Double num2 = Double.parseDouble(val2);
+                            return num2.compareTo(num1);
+                        } catch (NumberFormatException e) {
+                            // 解析失败，降级为字符串比较
+                        }
+                    }
+
+                    // 其他情况（都是非数字，或一个是数字一个非数字）统一按字符串比较
+                    return val2.compareTo(val1);
+                });
+
+                // 找到第一个排序字段后就跳出循环
+                break;
+            }
+        }
+    }
+
+    /**
+     * 检测是否是存储过程调用
+     * 支持MySQL、PostgreSQL、SQL Server、Oracle
+     */
+    private boolean isStoredProcedureCall(String sql, String datasourceType) {
+        if (StringUtils.isEmpty(sql) || StringUtils.isEmpty(datasourceType)) {
+            return false;
+        }
+        String trimmedSql = sql.trim().toUpperCase();
+
+        // MySQL: CALL 存储过程名(参数1, 参数2, ...);
+        if ("mysql".equalsIgnoreCase(datasourceType)) {
+            return trimmedSql.matches("CALL\\s+[\\w.]+\\s*\\(.*\\).*");
+        }
+        // PostgreSQL: SELECT * FROM 存储过程名(参数1, 参数2, ...);
+        if ("pg".equalsIgnoreCase(datasourceType)) {
+            return trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
+        }
+        // SQL Server: EXEC 存储过程名 参数1, 参数2, ...;
+        if ("sqlServer".equalsIgnoreCase(datasourceType)) {
+            return trimmedSql.matches("EXEC(?:UTE)?\\s+[\\w.]+(?:\\s+[^,\\s]+(?:\\s*,\\s*[^,\\s]+)*)?.*");
+        }
+        // Oracle: EXEC 存储过程名(参数1, 参数2, ...);
+        if ("oracle".equalsIgnoreCase(datasourceType)) {
+            return trimmedSql.matches("EXEC(?:UTE)?\\s+[\\w.]+\\s*\\(.*\\).*");
+        }
+        return false;
     }
 }
