@@ -1458,6 +1458,11 @@ public class ChartViewService {
                 axis.addAll(xAxis);
                 axis.addAll(yAxis);
 
+                // 如果 yAxis 不为空，则进行分组和聚合处理
+                if (!yAxis.isEmpty()) {
+                    data = handleStoredProcedureGroupAggregation(data, xAxis, yAxis);
+                }
+
                 // 调用存储过程排序方法
                 sortStoredProcedureData(data, axis);
 
@@ -3032,5 +3037,193 @@ public class ChartViewService {
             return trimmedSql.matches("EXEC(?:UTE)?\\s+[\\w.]+\\s*\\(.*\\).*");
         }
         return false;
+    }
+
+    /**
+     * 处理存储过程的分组和聚合
+     * 根据 xAxis 的 columnIndex 进行分组，对 yAxis 的数据进行聚合计算
+     *
+     * @param data 原始数据
+     * @param xAxis X轴字段列表
+     * @param yAxis Y轴字段列表
+     * @return 分组聚合后的数据
+     */
+    private List<String[]> handleStoredProcedureGroupAggregation(List<String[]> data, List<ChartViewFieldDTO> xAxis, List<ChartViewFieldDTO> yAxis) {
+        if (CollectionUtils.isEmpty(data) || CollectionUtils.isEmpty(yAxis)) {
+            return data;
+        }
+
+        // 按 xAxis 分组，每个分组存储所有行的数据，用于后续按 yAxis 处理
+        Map<String, List<String[]>> groupMap = new LinkedHashMap<>();
+
+        for (String[] row : data) {
+            // 构建分组键
+            StringBuilder groupKeyBuilder = new StringBuilder();
+            for (int i = 0; i < xAxis.size(); i++) {
+                ChartViewFieldDTO chartViewFieldDTO = xAxis.get(i);
+                Integer columnIndex = chartViewFieldDTO.getColumnIndex();
+                if (columnIndex != null && columnIndex >= 0 && columnIndex < row.length) {
+                    if (i > 0) {
+                        groupKeyBuilder.append("\t"); // 使用制表符分隔多个维度
+                    }
+                    groupKeyBuilder.append(row[columnIndex]);
+                }
+            }
+            String groupKey = groupKeyBuilder.toString();
+            groupMap.computeIfAbsent(groupKey, k -> new ArrayList<>()).add(row);
+        }
+
+        // 对每个分组进行聚合计算
+        List<String[]> result = new ArrayList<>();
+        for (Map.Entry<String, List<String[]>> entry : groupMap.entrySet()) {
+            String groupKey = entry.getKey();
+            List<String[]> rows = entry.getValue();
+
+            // 解析分组键（多个维度用制表符分隔）
+            String[] dimensions = groupKey.split("\t");
+
+            // 构建结果行：维度列 + 所有 yAxis 的聚合结果
+            String[] resultRow = new String[dimensions.length + yAxis.size()];
+
+            // 填充维度列
+            for (int i = 0; i < dimensions.length; i++) {
+                resultRow[i] = dimensions[i];
+            }
+
+            // 对每个 yAxis 进行聚合计算
+            for (int i = 0; i < yAxis.size(); i++) {
+                ChartViewFieldDTO yAxisField = yAxis.get(i);
+                Integer yAxisColumnIndex = yAxisField.getColumnIndex();
+                String summary = yAxisField.getSummary();
+
+                if (StringUtils.isEmpty(summary)) {
+                    summary = "sum"; // 默认求和
+                }
+
+                if (yAxisColumnIndex == null || yAxisColumnIndex < 0) {
+                    resultRow[dimensions.length + i] = "0";
+                    continue;
+                }
+
+                // 从所有行中提取该 yAxis 列的值
+                List<BigDecimal> values = new ArrayList<>();
+                for (String[] row : rows) {
+                    if (yAxisColumnIndex < row.length && StringUtils.isNotEmpty(row[yAxisColumnIndex])) {
+                        try {
+                            BigDecimal value = new BigDecimal(row[yAxisColumnIndex]);
+                            values.add(value);
+                        } catch (NumberFormatException e) {
+                            // 忽略非数字值
+                        }
+                    }
+                }
+
+                // 执行聚合计算
+                BigDecimal aggregatedValue = aggregateValues(values, summary);
+                resultRow[dimensions.length + i] = aggregatedValue != null ? aggregatedValue.toString() : "0";
+            }
+
+            result.add(resultRow);
+        }
+
+        return result;
+    }
+
+    /**
+     * 根据聚合方式对值列表进行聚合计算
+     *
+     * @param values 值列表
+     * @param summary 聚合方式：sum、avg、max、min、stddev、variance、count、distinct
+     * @return 聚合结果
+     */
+    private BigDecimal aggregateValues(List<BigDecimal> values, String summary) {
+        if (CollectionUtils.isEmpty(values)) {
+            return BigDecimal.ZERO;
+        }
+
+        switch (summary.toLowerCase()) {
+            case "sum":
+                // 求和
+                BigDecimal sum = BigDecimal.ZERO;
+                for (BigDecimal value : values) {
+                    if (value != null) {
+                        sum = sum.add(value);
+                    }
+                }
+                return sum;
+
+            case "avg":
+                // 平均值
+                BigDecimal sumAvg = BigDecimal.ZERO;
+                int count = 0;
+                for (BigDecimal value : values) {
+                    if (value != null) {
+                        sumAvg = sumAvg.add(value);
+                        count++;
+                    }
+                }
+                return count > 0 ? sumAvg.divide(new BigDecimal(count), 8, RoundingMode.HALF_UP) : BigDecimal.ZERO;
+
+            case "max":
+                // 最大值
+                BigDecimal max = values.get(0);
+                for (BigDecimal value : values) {
+                    if (value != null && value.compareTo(max) > 0) {
+                        max = value;
+                    }
+                }
+                return max;
+
+            case "min":
+                // 最小值
+                BigDecimal min = values.get(0);
+                for (BigDecimal value : values) {
+                    if (value != null && value.compareTo(min) < 0) {
+                        min = value;
+                    }
+                }
+                return min;
+
+            case "stddev_pop":
+                // 标准差
+                BigDecimal mean = aggregateValues(values, "avg");
+                BigDecimal variance = BigDecimal.ZERO;
+                for (BigDecimal value : values) {
+                    if (value != null) {
+                        BigDecimal diff = value.subtract(mean);
+                        variance = variance.add(diff.multiply(diff));
+                    }
+                }
+                if (values.size() > 1) {
+                    variance = variance.divide(new BigDecimal(values.size()), 8, RoundingMode.HALF_UP);
+                    // 使用 sqrt 方法计算平方根
+                    return new BigDecimal(Math.sqrt(variance.doubleValue())).setScale(8, RoundingMode.HALF_UP);
+                }
+                return BigDecimal.ZERO;
+
+            case "var_pop":
+                // 方差
+                BigDecimal avg = aggregateValues(values, "avg");
+                BigDecimal sumDiffSquared = BigDecimal.ZERO;
+                for (BigDecimal value : values) {
+                    if (value != null) {
+                        BigDecimal diff = value.subtract(avg);
+                        sumDiffSquared = sumDiffSquared.add(diff.multiply(diff));
+                    }
+                }
+                return values.size() > 0 ? sumDiffSquared.divide(new BigDecimal(values.size()), 8, RoundingMode.HALF_UP) : BigDecimal.ZERO;
+
+            case "count":
+                // 计数
+                return new BigDecimal(values.size());
+
+            case "count_distinct":
+                // 去重计数
+                return new BigDecimal(new HashSet<>(values).size());
+
+            default:
+                // 默认求和
+                return aggregateValues(values, "sum");
+        }
     }
 }
