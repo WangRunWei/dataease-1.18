@@ -701,6 +701,8 @@ public class DataSetTableService {
                 if (isStoredProcedureCall(sql, ds.getType())) {
                     // 存储过程变量取真实数据
                     sql = handleVariableDefaultValue(sql, datasetTable.getSqlVariableDetails(), ds.getType(), true);
+                    // 如果参数的真实数据为空，则将参数替换为NULL
+                    sql = sql.replace("'" + SubstitutedParams + "'", "null");
 
                     // 存储过程调用：直接使用原始SQL，在Java中实现分页
                     datasourceRequest.setQuery(sql);
@@ -1379,8 +1381,8 @@ public class DataSetTableService {
         // 检测是否是存储过程调用，如果是则直接执行原始SQL，不通过createSQLPreview包装
         String sqlAsTable;
         if (isStoredProcedureCall(sql, ds.getType())) {
-            // 存储过程调用：直接使用原始SQL
-            sqlAsTable = sql;
+            // 存储过程调用：直接使用原始SQL, 如果存储过程参数为空，则替换为null
+            sqlAsTable = sql.replace("'" + SubstitutedParams + "'", "null");
         } else {
             // 普通查询：使用createSQLPreview包装
             sqlAsTable = qp.createSQLPreview(sql, null);
@@ -2033,7 +2035,8 @@ public class DataSetTableService {
             if (isStoredProcedureCall(sql, ds.getType())) {
                 // 存储过程调用：直接使用原始SQL，SQL中的参数设置为真实参数
                 sql = handleVariableDefaultValue(sql, dataSetTableRequest.getSqlVariableDetails(), ds.getType(), true);
-                sqlAsTable = sql;
+                // 如果有参数未设置真实值则将参数值设置为null
+                sqlAsTable = sql.replace("'" + SubstitutedParams + "'", "null");
             } else {
 
                 sql = removeVariables(sql, ds.getType()).replaceAll(SubstitutedSql.trim(), SubstitutedSqlVirtualData);

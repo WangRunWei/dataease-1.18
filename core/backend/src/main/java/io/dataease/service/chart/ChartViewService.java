@@ -1454,22 +1454,26 @@ public class ChartViewService {
 
             // 对存储过程的查询结果进行分页处理（存储过程在 SQL 层无法分页，需要在 Java 层分页）
             if (isStoredProcedure && StringUtils.equalsIgnoreCase(table.getType(), DatasetType.SQL.name())) {
+
                 List<ChartViewFieldDTO> axis = new ArrayList<>();
                 axis.addAll(xAxis);
                 axis.addAll(yAxis);
 
-                // 如果 yAxis 不为空，则进行分组和聚合处理
-                if (!yAxis.isEmpty()) {
+                // 如果 yAxis 和 data 不为空，则进行分组和聚合处理
+                if (!yAxis.isEmpty() && !data.isEmpty()) {
                     data = handleStoredProcedureGroupAggregation(data, xAxis, yAxis);
                 }
 
                 // 调用存储过程排序方法
                 sortStoredProcedureData(data, axis);
 
-                // 根据resultCount限制返回的数据条数
-                Integer resultCount = view.getResultCount();
-                if (resultCount != null && resultCount > 0 && data.size() > resultCount) {
-                    data = data.subList(0, resultCount);
+                // 如果视图结果展示模式为自定义，则根据自定义的数量限制返回的数据条数
+                if("custom".equals(view.getResultMode())){
+                    // 根据resultCount限制返回的数据条数
+                    Integer resultCount = view.getResultCount();
+                    if (resultCount != null && resultCount > 0 && data.size() > resultCount) {
+                        data = data.subList(0, resultCount);
+                    }
                 }
 
                 List<Integer> columnIndexList = axis.stream()
@@ -3056,17 +3060,21 @@ public class ChartViewService {
         // 按 xAxis 分组，每个分组存储所有行的数据，用于后续按 yAxis 处理
         Map<String, List<String[]>> groupMap = new LinkedHashMap<>();
 
+        // 将视图的维度所有columnIndex存储，方便后续取列数下标
+        Integer[] columnIndexes = xAxis.stream()
+                .map(field -> (field != null) ? field.getColumnIndex() : -1)
+                .toArray(Integer[]::new);;
+
+        // 根据视图的维度对数据进行分组
         for (String[] row : data) {
             // 构建分组键
             StringBuilder groupKeyBuilder = new StringBuilder();
             for (int i = 0; i < xAxis.size(); i++) {
-                ChartViewFieldDTO chartViewFieldDTO = xAxis.get(i);
-                Integer columnIndex = chartViewFieldDTO.getColumnIndex();
-                if (columnIndex != null && columnIndex >= 0 && columnIndex < row.length) {
+                if (columnIndexes[i] != null && columnIndexes[i] >= 0 && columnIndexes[i] < row.length) {
                     if (i > 0) {
                         groupKeyBuilder.append("\t"); // 使用制表符分隔多个维度
                     }
-                    groupKeyBuilder.append(row[columnIndex]);
+                    groupKeyBuilder.append(row[columnIndexes[i]]);
                 }
             }
             String groupKey = groupKeyBuilder.toString();
@@ -3074,6 +3082,7 @@ public class ChartViewService {
         }
 
         // 对每个分组进行聚合计算
+        int arrayLength = data.get(0).length;
         List<String[]> result = new ArrayList<>();
         for (Map.Entry<String, List<String[]>> entry : groupMap.entrySet()) {
             String groupKey = entry.getKey();
@@ -3082,17 +3091,18 @@ public class ChartViewService {
             // 解析分组键（多个维度用制表符分隔）
             String[] dimensions = groupKey.split("\t");
 
-            // 构建结果行：维度列 + 所有 yAxis 的聚合结果
-            String[] resultRow = new String[dimensions.length + yAxis.size()];
+            // 构建结果行：维度列 + 所有 yAxis 的聚合结果，数组长度数取决于data数据的字符串数组的长度
+            String[] resultRow = new String[arrayLength];
 
             // 填充维度列
             for (int i = 0; i < dimensions.length; i++) {
-                resultRow[i] = dimensions[i];
+                if (columnIndexes[i] != null) {
+                    resultRow[columnIndexes[i]] = dimensions[i];
+                }
             }
 
             // 对每个 yAxis 进行聚合计算
-            for (int i = 0; i < yAxis.size(); i++) {
-                ChartViewFieldDTO yAxisField = yAxis.get(i);
+            for (ChartViewFieldDTO yAxisField : yAxis) {
                 Integer yAxisColumnIndex = yAxisField.getColumnIndex();
                 String summary = yAxisField.getSummary();
 
@@ -3101,7 +3111,6 @@ public class ChartViewService {
                 }
 
                 if (yAxisColumnIndex == null || yAxisColumnIndex < 0) {
-                    resultRow[dimensions.length + i] = "0";
                     continue;
                 }
 
@@ -3120,7 +3129,7 @@ public class ChartViewService {
 
                 // 执行聚合计算
                 BigDecimal aggregatedValue = aggregateValues(values, summary);
-                resultRow[dimensions.length + i] = aggregatedValue != null ? aggregatedValue.toString() : "0";
+                resultRow[yAxisColumnIndex] = aggregatedValue != null ? aggregatedValue.toString() : "0";
             }
 
             result.add(resultRow);
