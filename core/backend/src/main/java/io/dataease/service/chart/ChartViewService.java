@@ -137,8 +137,6 @@ public class ChartViewService {
 
     private static final String START_END_SEPARATOR = "_START_END_SPLIT";
 
-    private static final String SubstitutedParams = "'DATAEASE_PATAMS_BI'";
-
 
     //默认使用非公平
     private ReentrantLock lock = new ReentrantLock();
@@ -1345,7 +1343,7 @@ public class ChartViewService {
                     }
                 } else {
                     // 存储过程调用：直接使用原始SQL，将参数都替换成空，不通过QueryProvider包装
-                    querySql = sql.replaceAll(SubstitutedParams, "null");
+                    querySql = dataSetTableService.replaceEmptyParamsWithNull(sql, dataSetTableService.SubstitutedParams);
                 }
             } else if (StringUtils.equalsIgnoreCase(table.getType(), DatasetType.CUSTOM.name())) {
                 DataTableInfoDTO dt = gson.fromJson(table.getInfo(), DataTableInfoDTO.class);

@@ -153,7 +153,7 @@ public class DataSetTableService {
     private static final String lastUpdateTime = "${__last_update_time__}";
     private static final String currentUpdateTime = "${__current_update_time__}";
     public static final String regex = "\\$\\{(.*?)\\}";
-    private static final String SubstitutedParams = "DATAEASE_PATAMS_BI";
+    public static final String SubstitutedParams = "DATAEASE_PATAMS_BI";
     private static final String SubstitutedSql = " 'BI' = 'BI' ";
     private static final String SubstitutedSqlVirtualData = " 1 > 2 ";
 
@@ -702,7 +702,7 @@ public class DataSetTableService {
                     // 存储过程变量取真实数据
                     sql = handleVariableDefaultValue(sql, datasetTable.getSqlVariableDetails(), ds.getType(), true);
                     // 如果参数的真实数据为空，则将参数替换为NULL
-                    sql = sql.replace("'" + SubstitutedParams + "'", "null");
+                    sql = replaceEmptyParamsWithNull(sql, SubstitutedParams);
 
                     // 存储过程调用：直接使用原始SQL，在Java中实现分页
                     datasourceRequest.setQuery(sql);
@@ -1382,7 +1382,7 @@ public class DataSetTableService {
         String sqlAsTable;
         if (isStoredProcedureCall(sql, ds.getType())) {
             // 存储过程调用：直接使用原始SQL, 如果存储过程参数为空，则替换为null
-            sqlAsTable = sql.replace("'" + SubstitutedParams + "'", "null");
+            sqlAsTable = replaceEmptyParamsWithNull(sql, SubstitutedParams);
         } else {
             // 普通查询：使用createSQLPreview包装
             sqlAsTable = qp.createSQLPreview(sql, null);
@@ -2036,7 +2036,7 @@ public class DataSetTableService {
                 // 存储过程调用：直接使用原始SQL，SQL中的参数设置为真实参数
                 sql = handleVariableDefaultValue(sql, dataSetTableRequest.getSqlVariableDetails(), ds.getType(), true);
                 // 如果有参数未设置真实值则将参数值设置为null
-                sqlAsTable = sql.replace("'" + SubstitutedParams + "'", "null");
+                sqlAsTable = replaceEmptyParamsWithNull(sql, SubstitutedParams);
             } else {
 
                 sql = removeVariables(sql, ds.getType()).replaceAll(SubstitutedSql.trim(), SubstitutedSqlVirtualData);
@@ -3189,6 +3189,21 @@ public class DataSetTableService {
 
 
     }
+
+    /**
+     * 将存储过程中未设置值的参数替换为null
+     * @param sql SQL语句
+     * @param substitutedParams 未设置值的参数
+     * @return 替换后的SQL语句
+     */
+    public String replaceEmptyParamsWithNull(String sql, String substitutedParams) {
+        // 替换单引号包裹的参数：'DATAEASE_PATAMS_BI' -> null
+        sql = sql.replace("'" + substitutedParams + "'", "null");
+        // 替换双引号包裹的参数："DATAEASE_PATAMS_BI" -> null
+        sql = sql.replace("\"" + substitutedParams + "\"", "null");
+        return sql;
+    }
+
 
     @Data
     public class NoModelDataListener extends AnalysisEventListener<Map<Integer, String>> {
