@@ -1494,6 +1494,10 @@ public class ChartViewService {
                     data = reorderedData;
                 }
 
+                // 处理存储过程联动过滤
+                List<ChartExtFilterRequest> linkageFilters = chartExtRequest.getLinkageFilters();
+                data = handleStoredProcedureLinkage(data, axis, linkageFilters);
+
                 Long goPage = chartExtRequest.getGoPage();
                 Long pageSize = chartExtRequest.getPageSize();
                 if (goPage != null && pageSize != null && data.size() > pageSize) {
@@ -2917,6 +2921,269 @@ public class ChartViewService {
     }
 
     /**
+     * 处理存储过程联动过滤
+     * 根据联动过滤器对存储过程查询结果进行过滤,支持精确匹配(=)、IN查询和BETWEEN范围查询
+     *
+     * @param data 存储过程查询结果数据
+     * @param axis 包含所有字段的列表(用于查找字段位置)
+     * @param linkageFilters 联动过滤器列表
+     * @return 过滤后的数据
+     */
+    private List<String[]> handleStoredProcedureLinkage(List<String[]> data, List<ChartViewFieldDTO> axis, List<ChartExtFilterRequest> linkageFilters) {
+        if (CollectionUtils.isEmpty(data) || CollectionUtils.isEmpty(axis) || CollectionUtils.isEmpty(linkageFilters)) {
+            return data;
+        }
+
+        for (ChartExtFilterRequest linkageFilter : linkageFilters) {
+            String fieldId = linkageFilter.getFieldId();
+            String operator = linkageFilter.getOperator();
+            List<String> value = linkageFilter.getValue();
+
+            for (int i = 0; i < axis.size(); i++) {
+                ChartViewFieldDTO chartViewFieldDTO = axis.get(i);
+
+                if (chartViewFieldDTO.getId().equals(fieldId)) {
+                    final int index = i;
+
+                    if ("eq".equals(operator)) {
+                        // 根据value数组的长度判断使用精确匹配还是IN查询
+                        if (value.size() == 1) {
+                            // 单个值,使用精确匹配(=)
+                            String singleValue = value.get(0);
+                            data = data.stream()
+                                    .filter(row -> singleValue.equals(row[index]))
+                                    .collect(Collectors.toList());
+                        } else {
+                            // 多个值,使用IN查询
+                            data = data.stream()
+                                    .filter(row -> value.contains(row[index]))
+                                    .collect(Collectors.toList());
+                        }
+                    } else if ("between".equals(operator)) {
+                        // between过滤,需要2个值
+                        if (value.size() == 2) {
+                            String startValue = value.get(0);
+                            String endValue = value.get(1);
+
+                            // 判断字段是否有指定的日期格式或字段类型是否为日期时间类型
+                            String dateFormat = chartViewFieldDTO.getDateFormat();
+                            String type = chartViewFieldDTO.getType();
+                            if (StringUtils.isNotEmpty(dateFormat) || isDateTimeType(type)) {
+                                // 如果指定了dateFormat或字段类型为日期时间类型,则进行日期转换后再转换为时间戳比较
+                                data = data.stream()
+                                        .filter(row -> {
+                                            String rowValue = row[index];
+                                            if (StringUtils.isEmpty(rowValue)) {
+                                                return false;
+                                            }
+                                            try {
+                                                long rowTimestamp;
+                                                // 如果指定了dateFormat,则按dateFormat转换
+                                                if (StringUtils.isNotEmpty(dateFormat)) {
+                                                    rowTimestamp = parseDateTimeByFormat(rowValue, dateFormat);
+                                                } else {
+                                                    // 否则使用parseDateTimeToTimestamp自动识别日期格式
+                                                    rowTimestamp = parseDateTimeToTimestamp(rowValue);
+                                                }
+
+                                                // startValue和endValue直接转换为时间戳(已经是时间戳格式)
+                                                long startTimestamp = Long.parseLong(startValue);
+                                                long endTimestamp = Long.parseLong(endValue);
+
+                                                // 如果转换失败(返回-1),则过滤掉该行
+                                                if (rowTimestamp == -1) {
+                                                    return false;
+                                                }
+
+                                                return rowTimestamp >= startTimestamp && rowTimestamp <= endTimestamp;
+                                            } catch (Exception e) {
+                                                return false;
+                                            }
+                                        })
+                                        .collect(Collectors.toList());
+                            } else {
+                                // 非日期时间类型,按字符串或数字进行比较
+                                data = data.stream()
+                                        .filter(row -> {
+                                            String rowValue = row[index];
+                                            if (StringUtils.isEmpty(rowValue)) {
+                                                return false;
+                                            }
+                                            // 尝试按数字比较
+                                            try {
+                                                double rowNum = Double.parseDouble(rowValue);
+                                                double startNum = Double.parseDouble(startValue);
+                                                double endNum = Double.parseDouble(endValue);
+                                                return rowNum >= startNum && rowNum <= endNum;
+                                            } catch (NumberFormatException e) {
+                                                // 数字解析失败,按字符串比较
+                                                return rowValue.compareTo(startValue) >= 0 && rowValue.compareTo(endValue) <= 0;
+                                            }
+                                        })
+                                        .collect(Collectors.toList());
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        return data;
+    }
+
+    /**
+     * 将各种日期格式转换为毫秒级时间戳
+     * 支持多种常见日期格式:
+     * - 时间戳(毫秒): 1704988800000
+     * - 年月日时分秒: 2024-01-05 00:00:00, 2024-01-05 00:00:00.0
+     * - 年月日: 2024-01-05
+     * - 年月: 2024-01
+     * - 年: 2024
+     * - 年/月/日: 2024/01/05
+     *
+     * @param dateTimeStr 日期时间字符串
+     * @return 毫秒级时间戳,转换失败返回-1
+     */
+    private long parseDateTimeToTimestamp(String dateTimeStr) {
+        if (StringUtils.isEmpty(dateTimeStr)) {
+            return -1;
+        }
+
+        // 去除首尾空格
+        dateTimeStr = dateTimeStr.trim();
+
+        // 1. 尝试直接解析为时间戳(毫秒)
+        try {
+            return Long.parseLong(dateTimeStr);
+        } catch (NumberFormatException e) {
+            // 不是纯数字,继续尝试其他格式
+        }
+
+        // 定义多种日期格式
+        String[] patterns = {
+            "yyyy-MM-dd HH:mm:ss.S",  // 2024-01-05 00:00:00.0
+            "yyyy-MM-dd HH:mm:ss",    // 2024-01-05 00:00:00
+            "yyyy-MM-dd HH:mm",       // 2024-01-05 00:00
+            "yyyy-MM-dd",             // 2024-01-05
+            "yyyy/MM/dd HH:mm:ss",    // 2024/01/05 00:00:00
+            "yyyy/MM/dd",             // 2024/01/05
+            "yyyy-MM",                // 2024-01
+            "yyyy/MM",                // 2024/01
+            "yyyy"                    // 2024
+        };
+
+        for (String pattern : patterns) {
+            try {
+                java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat(pattern);
+                java.util.Date date = sdf.parse(dateTimeStr);
+                return date.getTime();
+            } catch (Exception e) {
+                // 继续尝试下一个格式
+            }
+        }
+
+        // 所有格式都解析失败
+        return -1;
+    }
+
+    /**
+     * 根据指定的日期格式将日期字符串转换为毫秒级时间戳
+     * 支持Java SimpleDateFormat格式和MySQL日期格式
+     *
+     * @param dateTimeStr 日期时间字符串
+     * @param dateFormat 日期格式(例如: "yyyy-MM-dd", "yyyy/MM/dd HH:mm:ss", "%Y-%m-%d %H:%i:%S")
+     * @return 毫秒级时间戳,转换失败返回-1
+     */
+    private long parseDateTimeByFormat(String dateTimeStr, String dateFormat) {
+        if (StringUtils.isEmpty(dateTimeStr) || StringUtils.isEmpty(dateFormat)) {
+            return -1;
+        }
+
+        // 去除首尾空格
+        dateTimeStr = dateTimeStr.trim();
+        dateFormat = dateFormat.trim();
+
+        // 1. 尝试直接解析为时间戳(毫秒)
+        try {
+            return Long.parseLong(dateTimeStr);
+        } catch (NumberFormatException e) {
+            // 不是纯数字,继续尝试日期格式解析
+        }
+
+        // 2. 将MySQL日期格式转换为Java SimpleDateFormat格式
+        String javaFormat = convertMySQLFormatToJava(dateFormat);
+
+        // 3. 根据转换后的格式进行解析
+        try {
+            java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat(javaFormat);
+            java.util.Date date = sdf.parse(dateTimeStr);
+            return date.getTime();
+        } catch (Exception e) {
+            // 指定格式解析失败,返回-1
+            return -1;
+        }
+    }
+
+    /**
+     * 将MySQL日期格式转换为Java SimpleDateFormat格式
+     *
+     * MySQL格式符号:
+     * %Y: 年份(4位)
+     * %m: 月份(01-12)
+     * %d: 日期(01-31)
+     * %H: 小时(00-23)
+     * %i: 分钟(00-59)
+     * %S: 秒(00-59)
+     *
+     * Java格式符号:
+     * yyyy: 年份
+     * MM: 月份
+     * dd: 日期
+     * HH: 小时
+     * mm: 分钟
+     * ss: 秒
+     *
+     * @param mysqlFormat MySQL日期格式
+     * @return Java SimpleDateFormat格式
+     */
+    private String convertMySQLFormatToJava(String mysqlFormat) {
+        if (StringUtils.isEmpty(mysqlFormat)) {
+            return mysqlFormat;
+        }
+
+        // 替换MySQL格式符号为Java格式符号
+        // 注意替换顺序,避免重复替换
+        String javaFormat = mysqlFormat
+                .replace("%Y", "yyyy")  // 年份
+                .replace("%m", "MM")    // 月份
+                .replace("%d", "dd")    // 日期
+                .replace("%H", "HH")    // 小时
+                .replace("%i", "mm")    // 分钟
+                .replace("%S", "ss");   // 秒
+
+        return javaFormat;
+    }
+
+    /**
+     * 判断字段类型是否为日期时间类型
+     *
+     * @param fieldType 字段类型
+     * @return 是否为日期时间类型
+     */
+    private boolean isDateTimeType(String fieldType) {
+        if (StringUtils.isEmpty(fieldType)) {
+            return false;
+        }
+        // 常见的日期时间类型
+        return fieldType.equalsIgnoreCase("DATE")
+                || fieldType.equalsIgnoreCase("DATETIME")
+                || fieldType.equalsIgnoreCase("TIMESTAMP")
+                || fieldType.equalsIgnoreCase("TIME")
+                || fieldType.equalsIgnoreCase("YEAR");
+    }
+
+    /**
      * 对存储过程查询结果进行排序
      * 根据 ChartViewFieldDTO 中的 columnIndex 和 sort 字段对数据进行排序
      *
@@ -3055,6 +3322,11 @@ public class ChartViewService {
             return data;
         }
 
+        // 如果 xAxis 为空，则不用分组直接聚合，直接根据 data 中的每一个字符串数组中的每一列进行聚合
+        if (CollectionUtils.isEmpty(xAxis)) {
+            return aggregateWithoutGroup(data, yAxis);
+        }
+
         // 按 xAxis 分组，每个分组存储所有行的数据，用于后续按 yAxis 处理
         Map<String, List<String[]>> groupMap = new LinkedHashMap<>();
 
@@ -3133,6 +3405,55 @@ public class ChartViewService {
             result.add(resultRow);
         }
 
+        return result;
+    }
+
+    /**
+     * 不分组直接聚合，对所有数据的每一列进行聚合计算
+     *
+     * @param data 原始数据
+     * @param yAxis Y轴字段列表
+     * @return 聚合后的数据（只有一行）
+     */
+    private List<String[]> aggregateWithoutGroup(List<String[]> data, List<ChartViewFieldDTO> yAxis) {
+        int arrayLength = data.get(0).length;
+        List<String[]> result = new ArrayList<>();
+
+        // 构建结果行（只有一行）
+        String[] resultRow = new String[arrayLength];
+
+        // 对每个 yAxis 进行聚合计算
+        for (ChartViewFieldDTO yAxisField : yAxis) {
+            Integer yAxisColumnIndex = yAxisField.getColumnIndex();
+            String summary = yAxisField.getSummary();
+
+            if (StringUtils.isEmpty(summary)) {
+                summary = "sum"; // 默认求和
+            }
+
+            if (yAxisColumnIndex == null || yAxisColumnIndex < 0) {
+                continue;
+            }
+
+            // 从所有行中提取该 yAxis 列的值
+            List<BigDecimal> values = new ArrayList<>();
+            for (String[] row : data) {
+                if (yAxisColumnIndex < row.length && StringUtils.isNotEmpty(row[yAxisColumnIndex])) {
+                    try {
+                        BigDecimal value = new BigDecimal(row[yAxisColumnIndex]);
+                        values.add(value);
+                    } catch (NumberFormatException e) {
+                        // 忽略非数字值
+                    }
+                }
+            }
+
+            // 执行聚合计算
+            BigDecimal aggregatedValue = aggregateValues(values, summary);
+            resultRow[yAxisColumnIndex] = aggregatedValue != null ? aggregatedValue.toString() : "0";
+        }
+
+        result.add(resultRow);
         return result;
     }
 

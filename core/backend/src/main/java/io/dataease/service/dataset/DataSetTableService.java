@@ -725,7 +725,28 @@ public class DataSetTableService {
 
                         if (startIndex < totalRecords && startIndex < allData.size()) {
                             List<String[]> pageData = allData.subList(startIndex, endIndex);
-                            data.addAll(pageData);
+                            if(extFields != null && !extFields.isEmpty()){
+                                // 根据extFields集合中每一个DatasetTableField的columnIndex获取pageData集合的字符串数组中的对应列
+                                // 例如extFields中每个DatasetTableField的columnIndex为3和5,那就只截取pageData集合的字符串数组中的第四列和第六列
+                                // 因为columnIndex是下标0开始的,然后将获取的列添加到data中
+                                List<String[]> filteredData = new ArrayList<>();
+                                for (String[] row : pageData) {
+                                    List<String> filteredRow = new ArrayList<>();
+                                    for (DatasetTableField field : extFields) {
+                                        Integer columnIndex = field.getColumnIndex();
+                                        if (columnIndex != null && columnIndex >= 0 && columnIndex < row.length) {
+                                            filteredRow.add(row[columnIndex]);
+                                        }
+                                    }
+                                    if (!filteredRow.isEmpty()) {
+                                        filteredData.add(filteredRow.toArray(new String[0]));
+                                    }
+                                }
+                                data.addAll(filteredData);
+                            }else{
+                                data.addAll(pageData);
+                            }
+
                         }
                     } catch (Exception e) {
                         logger.error(e.getMessage());
