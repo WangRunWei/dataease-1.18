@@ -1173,17 +1173,66 @@ public class ChartViewService {
             fieldMap.put("extBubble", extBubble);
             fieldMap.put("yAxis", yAxis);
             PluginViewParam pluginViewParam = buildPluginParam(fieldMap, fieldCustomFilter, extFilterList, ds, table, view, rowPermissionsTree, chartExtRequest);
-            String sql = pluginViewSql(pluginViewParam, view);
-            if (StringUtils.isBlank(sql)) {
-                return emptyChartViewDTO(view);
-            }
-            logger.info("plugin_sql:" + sql);
-            datasourceRequest.setQuery(sql);
-            data = datasourceProvider.getData(datasourceRequest);
-            data = resultCustomSort(xAxis, data);
 
-            // 插件同环比
-            data = pluginViewYOY(pluginViewParam, view, data, ds);
+            // 检测是否为存储过程
+            boolean isPluginStoredProcedure = false;
+            String sql = null;
+
+            // 只对SQL数据集进行存储过程检测
+            if (StringUtils.equalsIgnoreCase(table.getType(), DatasetType.SQL.name())) {
+                PluginViewSet pluginViewSet = pluginViewParam.getPluginViewSet();
+                DataTableInfoDTO dataTableInfoDTO = new Gson().fromJson(pluginViewSet.getInfo(), DataTableInfoDTO.class);
+                String originalSql = dataTableInfoDTO.isBase64Encryption()
+                    ? new String(java.util.Base64.getDecoder().decode(dataTableInfoDTO.getSql()), StandardCharsets.UTF_8)
+                    : dataTableInfoDTO.getSql();
+                // 检测是否是存储过程调用
+                isPluginStoredProcedure = isStoredProcedureCall(originalSql, ds.getType());
+            }
+
+            if (!isPluginStoredProcedure) {
+                // 普通SELECT查询：走原有逻辑
+                sql = pluginViewSql(pluginViewParam, view);
+                if (StringUtils.isBlank(sql)) {
+                    return emptyChartViewDTO(view);
+                }
+                logger.info("plugin_sql:" + sql);
+                datasourceRequest.setQuery(sql);
+                data = datasourceProvider.getData(datasourceRequest);
+                data = resultCustomSort(xAxis, data);
+
+                // 插件同环比
+                data = pluginViewYOY(pluginViewParam, view, data, ds);
+            } else {
+                // 存储过程查询：执行存储过程并进行后续处理
+                // 获取插件视图配置和数据表信息
+                PluginViewSet pluginViewSet = pluginViewParam.getPluginViewSet();
+                DataTableInfoDTO dataTableInfoDTO = new Gson().fromJson(pluginViewSet.getInfo(), DataTableInfoDTO.class);
+
+                // 获取存储过程SQL(支持Base64加密)
+                sql = dataTableInfoDTO.isBase64Encryption()
+                    ? new String(java.util.Base64.getDecoder().decode(dataTableInfoDTO.getSql()), StandardCharsets.UTF_8)
+                    : dataTableInfoDTO.getSql();
+
+                // 获取查询提供器,用于处理SQL变量
+                QueryProvider qp = ProviderFactory.getQueryProvider(ds.getType());
+
+                // 处理SQL中的变量参数(如${param_name}等动态参数)
+                sql = handleVariable(sql, chartExtRequest, qp, table, ds);
+
+                // 将空的参数替换为NULL(处理存储过程参数的默认值)
+                sql = dataSetTableService.replaceEmptyParamsWithNull(sql, DataSetTableService.SubstitutedParams);
+
+                // 记录最终的存储过程SQL(用于调试和日志追踪)
+                logger.info("plugin_storedProcedure:" + sql);
+
+                // 设置查询请求并执行存储过程
+                datasourceRequest.setQuery(sql);
+                data = datasourceProvider.getData(datasourceRequest);
+
+                // 对存储过程的查询结果进行后处理
+                // 包括: 分组聚合、排序、列重排、联动过滤、分页等
+                data = handlePluginStoredProcedureData(data, xAxis, yAxis, view, chartExtRequest);
+            }
 
             // 请求正确的数据，然后取值
             if (isYOY) {
@@ -3553,5 +3602,86 @@ public class ChartViewService {
                 // 默认求和
                 return aggregateValues(values, "sum");
         }
+    }
+
+    /**
+     * 处理插件视图存储过程的查询结果
+     * 包括分组聚合、排序、联动过滤、分页等处理
+     *
+     * @param data 存储过程查询结果
+     * @param xAxis X轴字段列表
+     * @param yAxis Y轴字段列表
+     * @param view 图表视图
+     * @param chartExtRequest 图表扩展请求
+     * @return 处理后的数据
+     */
+    private List<String[]> handlePluginStoredProcedureData(
+            List<String[]> data,
+            List<ChartViewFieldDTO> xAxis,
+            List<ChartViewFieldDTO> yAxis,
+            ChartViewDTO view,
+            ChartExtRequest chartExtRequest) {
+
+        if (CollectionUtils.isEmpty(data)) {
+            return data;
+        }
+
+        List<ChartViewFieldDTO> axis = new ArrayList<>();
+        axis.addAll(xAxis);
+        axis.addAll(yAxis);
+
+        // 如果 yAxis 和 data 不为空，则进行分组和聚合处理
+        if (!yAxis.isEmpty() && !data.isEmpty()) {
+            data = handleStoredProcedureGroupAggregation(data, xAxis, yAxis);
+        }
+
+        // 调用存储过程排序方法
+        sortStoredProcedureData(data, axis);
+
+        // 如果视图结果展示模式为自定义，则根据自定义的数量限制返回的数据条数
+        if ("custom".equals(view.getResultMode())) {
+            // 根据resultCount限制返回的数据条数
+            Integer resultCount = view.getResultCount();
+            if (resultCount != null && resultCount > 0 && data.size() > resultCount) {
+                data = data.subList(0, resultCount);
+            }
+        }
+
+        // 根据 columnIndex 对 data 进行列重排序
+        List<Integer> columnIndexList = axis.stream()
+                .map(ChartViewFieldDTO::getColumnIndex)
+                .collect(Collectors.toList());
+
+        if (CollectionUtils.isNotEmpty(columnIndexList)) {
+            List<String[]> reorderedData = new ArrayList<>();
+            for (String[] row : data) {
+                String[] newRow = new String[columnIndexList.size()];
+                for (int i = 0; i < columnIndexList.size(); i++) {
+                    Integer originalIndex = columnIndexList.get(i);
+                    if (originalIndex != null && originalIndex < row.length) {
+                        newRow[i] = row[originalIndex];
+                    }
+                }
+                reorderedData.add(newRow);
+            }
+            data = reorderedData;
+        }
+
+        // 处理存储过程联动过滤
+        List<ChartExtFilterRequest> linkageFilters = chartExtRequest.getLinkageFilters();
+        data = handleStoredProcedureLinkage(data, axis, linkageFilters);
+
+        // 分页处理
+        Long goPage = chartExtRequest.getGoPage();
+        Long pageSize = chartExtRequest.getPageSize();
+        if (goPage != null && pageSize != null && data.size() > pageSize) {
+            int startIndex = (int) ((goPage - 1) * pageSize);
+            int endIndex = (int) Math.min(startIndex + pageSize, data.size());
+            if (startIndex < data.size()) {
+                data = data.subList(startIndex, endIndex);
+            }
+        }
+
+        return data;
     }
 }
