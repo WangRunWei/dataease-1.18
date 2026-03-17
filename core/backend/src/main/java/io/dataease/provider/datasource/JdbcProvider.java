@@ -22,6 +22,9 @@ import io.dataease.plugins.datasource.provider.DefaultJdbcProvider;
 import io.dataease.plugins.datasource.provider.ExtendedJdbcClassLoader;
 import io.dataease.plugins.datasource.provider.ProviderFactory;
 import io.dataease.plugins.datasource.query.QueryProvider;
+import io.dataease.plugins.common.base.domain.DeDriverDetails;
+import io.dataease.plugins.common.base.domain.DeDriverDetailsExample;
+import io.dataease.plugins.common.base.mapper.DeDriverDetailsMapper;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
@@ -31,6 +34,11 @@ import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.sql.*;
 import java.util.*;
+import java.io.File;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.util.ArrayList;
+import java.util.List;
 
 @Service("jdbc")
 public class JdbcProvider extends DefaultJdbcProvider {
@@ -38,6 +46,11 @@ public class JdbcProvider extends DefaultJdbcProvider {
 
     @Resource
     private DeDriverMapper deDriverMapper;
+
+    @Resource
+    private DeDriverDetailsMapper deDriverDetailsMapper;
+
+    private static final String DRIVER_PATH = "/BITools/Server/resource/drivers/";
 
     @Override
     public boolean isUseDatasourcePool() {
@@ -652,7 +665,35 @@ public class JdbcProvider extends DefaultJdbcProvider {
             jdbcClassLoader = getCustomJdbcClassLoader(deDriver);
         }
 
-        Driver driverClass = (Driver) jdbcClassLoader.loadClass(driverClassName).newInstance();
+        // 调试日志：开始加载驱动类
+        LogUtil.info("准备加载驱动类: " + driverClassName);
+        LogUtil.info("使用 JDBC URL: " + jdbcurl);
+
+        Driver driverClass;
+        try {
+            // 尝试使用自定义类加载器加载驱动
+            Class<?> driverClazz = jdbcClassLoader.loadClass(driverClassName);
+            LogUtil.info("成功加载驱动类: " + driverClazz.getName());
+            LogUtil.info("驱动类加载器: " + driverClazz.getClassLoader());
+
+            driverClass = (Driver) driverClazz.newInstance();
+            LogUtil.info("成功创建驱动实例: " + driverClass.getClass().getName());
+        } catch (ClassNotFoundException e) {
+            LogUtil.error("驱动类未找到: " + driverClassName, e);
+            // 尝试使用系统类加载器作为备选方案
+            try {
+                LogUtil.info("尝试使用系统类加载器加载驱动...");
+                Class<?> driverClazz = Class.forName(driverClassName);
+                LogUtil.info("使用系统类加载器成功加载: " + driverClazz.getClassLoader());
+                driverClass = (Driver) driverClazz.newInstance();
+            } catch (Exception ex) {
+                LogUtil.error("系统类加载器也失败", ex);
+                throw new RuntimeException("无法加载驱动类: " + driverClassName, e);
+            }
+        } catch (Exception e) {
+            LogUtil.error("加载驱动时发生错误", e);
+            throw new RuntimeException("加载驱动失败: " + driverClassName, e);
+        }
         ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
         try {
             Thread.currentThread().setContextClassLoader(jdbcClassLoader);
@@ -991,5 +1032,80 @@ public class JdbcProvider extends DefaultJdbcProvider {
         }
     }
 
+    /**
+     * 重写父类的 getCustomJdbcClassLoader 方法
+     * 创建自定义 JDBC 类加载器，兼容 Spring Boot Fat Jar 环境
+     * 解决外部驱动 jar 包在打包后无法加载的问题
+     *
+     * @param deDriver 数据库驱动配置
+     * @return ExtendedJdbcClassLoader 类加载器实例
+     */
+    @Override
+    protected ExtendedJdbcClassLoader getCustomJdbcClassLoader(DeDriver deDriver) {
+        try {
+            LogUtil.info("开始创建自定义 JDBC 类加载器，驱动ID: " + deDriver.getId());
 
+            // 获取驱动的详情列表
+            DeDriverDetailsExample example = new DeDriverDetailsExample();
+            example.createCriteria().andDeDriverIdEqualTo(deDriver.getId());
+            List<DeDriverDetails> detailsList = deDriverDetailsMapper.selectByExample(example);
+
+            if (CollectionUtils.isEmpty(detailsList)) {
+                throw new RuntimeException("未找到驱动文件配置: " + deDriver.getId());
+            }
+
+            List<URL> urls = new ArrayList<>();
+            for (DeDriverDetails detail : detailsList) {
+                String driverPath;
+                // 判断使用转换后的文件名还是原始文件名
+                if (detail.getIsTransName() != null && detail.getIsTransName()) {
+                    driverPath = DRIVER_PATH + detail.getTransName();
+                } else {
+                    driverPath = DRIVER_PATH + detail.getFileName();
+                }
+
+                File driverFile = new File(driverPath);
+                if (!driverFile.exists()) {
+                    LogUtil.warn("驱动文件不存在: " + driverPath);
+                    continue;
+                }
+
+                URL url = driverFile.getAbsoluteFile().toURI().toURL();
+                urls.add(url);
+                LogUtil.info("添加驱动到类加载器: " + driverFile.getAbsolutePath());
+            }
+
+            if (urls.isEmpty()) {
+                throw new RuntimeException("没有找到可用的驱动文件: " + deDriver.getId());
+            }
+
+            // 使用当前线程的上下文类加载器作为父加载器
+            // 这样可以确保在 Spring Boot Fat Jar 环境下也能正确加载类
+            ClassLoader parentLoader = Thread.currentThread().getContextClassLoader();
+
+            // 创建扩展的 JDBC 类加载器
+            ExtendedJdbcClassLoader classLoader = new ExtendedJdbcClassLoader(
+                    urls.toArray(new URL[0]),
+                    parentLoader
+            );
+
+            LogUtil.info("成功创建类加载器，父类加载器: " + parentLoader.getClass().getName());
+            LogUtil.info("驱动类名: " + deDriver.getDriverClass());
+
+            // 输出类加载器的 URL 列表（用于调试）
+            if (classLoader instanceof URLClassLoader) {
+                URL[] classLoaderUrls = ((URLClassLoader) classLoader).getURLs();
+                LogUtil.info("类加载器 URL 列表:");
+                for (URL url : classLoaderUrls) {
+                    LogUtil.info("  - " + url);
+                }
+            }
+
+            return classLoader;
+
+        } catch (Exception e) {
+            LogUtil.error("创建自定义类加载器失败: " + deDriver.getId(), e);
+            throw new RuntimeException("无法加载驱动: " + deDriver.getId() + ", 错误: " + e.getMessage(), e);
+        }
+    }
 }

@@ -1229,9 +1229,19 @@ public class ChartViewService {
                 datasourceRequest.setQuery(sql);
                 data = datasourceProvider.getData(datasourceRequest);
 
+                // 构建 X 轴字段请求列表，合并基础 X 轴字段和扩展堆叠字段
+                List<ChartViewFieldDTO> xAxisForRequest = new ArrayList<>();
+                xAxisForRequest.addAll(xAxis);
+                xAxisForRequest.addAll(extStack);
+
+                // 构建 Y 轴字段请求列表
+                List<ChartViewFieldDTO> yAxisForRequest = new ArrayList<>();
+                yAxisForRequest.addAll(yAxis);
+
+
                 // 对存储过程的查询结果进行后处理
                 // 包括: 分组聚合、排序、列重排、联动过滤、分页等
-                data = handlePluginStoredProcedureData(data, xAxis, yAxis, view, chartExtRequest);
+                data = handlePluginStoredProcedureData(data, xAxisForRequest, yAxisForRequest, xAxis, yAxis, view, chartExtRequest);
             }
 
             // 请求正确的数据，然后取值
@@ -1501,64 +1511,18 @@ public class ChartViewService {
 
             // 对存储过程的查询结果进行分页处理（存储过程在 SQL 层无法分页，需要在 Java 层分页）
             if (isStoredProcedure && StringUtils.equalsIgnoreCase(table.getType(), DatasetType.SQL.name())) {
+                // 在分页前保存数据总数，用于计算分页信息
+                int dataBeforePagination = data.size();
 
-                List<ChartViewFieldDTO> axis = new ArrayList<>();
-                axis.addAll(xAxis);
-                axis.addAll(yAxis);
+                // 调用统一的存储过程数据处理方法
+                data = handlePluginStoredProcedureData(data, xAxisForRequest,yAxisForRequest, xAxis, yAxis, view, chartExtRequest);
 
-                // 如果 yAxis 和 data 不为空，则进行分组和聚合处理
-                if (!yAxis.isEmpty() && !data.isEmpty()) {
-                    data = handleStoredProcedureGroupAggregation(data, xAxis, yAxis);
-                }
-
-                // 调用存储过程排序方法
-                sortStoredProcedureData(data, axis);
-
-                // 如果视图结果展示模式为自定义，则根据自定义的数量限制返回的数据条数
-                if("custom".equals(view.getResultMode())){
-                    // 根据resultCount限制返回的数据条数
-                    Integer resultCount = view.getResultCount();
-                    if (resultCount != null && resultCount > 0 && data.size() > resultCount) {
-                        data = data.subList(0, resultCount);
-                    }
-                }
-
-                List<Integer> columnIndexList = axis.stream()
-                        .map(ChartViewFieldDTO::getColumnIndex)
-                        .collect(Collectors.toList());
-
-                // 根据 columnIndexList 对 data 进行列重排序
-                if (CollectionUtils.isNotEmpty(columnIndexList)) {
-                    List<String[]> reorderedData = new ArrayList<>();
-                    for (String[] row : data) {
-                        String[] newRow = new String[columnIndexList.size()];
-                        for (int i = 0; i < columnIndexList.size(); i++) {
-                            Integer originalIndex = columnIndexList.get(i);
-                            if (originalIndex != null && originalIndex < row.length) {
-                                newRow[i] = row[originalIndex];
-                            }
-                        }
-                        reorderedData.add(newRow);
-                    }
-                    data = reorderedData;
-                }
-
-                // 处理存储过程联动过滤
-                List<ChartExtFilterRequest> linkageFilters = chartExtRequest.getLinkageFilters();
-                data = handleStoredProcedureLinkage(data, axis, linkageFilters);
-
+                // 计算分页信息（只有在需要分页时才计算）
                 Long goPage = chartExtRequest.getGoPage();
                 Long pageSize = chartExtRequest.getPageSize();
-                if (goPage != null && pageSize != null && data.size() > pageSize) {
-                    // 计算总页数和总记录数
-                    totalPage = (data.size() / pageSize) + (data.size() % pageSize > 0 ? 1 : 0);
-                    totalItems = data.size();
-
-                    int startIndex = (int) ((goPage - 1) * pageSize);
-                    int endIndex = (int) Math.min(startIndex + pageSize, data.size());
-                    if (startIndex < data.size()) {
-                        data = data.subList(startIndex, endIndex);
-                    }
+                if (goPage != null && pageSize != null && dataBeforePagination > pageSize) {
+                    totalPage = (dataBeforePagination / pageSize) + (dataBeforePagination % pageSize > 0 ? 1 : 0);
+                    totalItems = dataBeforePagination;
                 }
             }
 
@@ -3606,77 +3570,146 @@ public class ChartViewService {
 
     /**
      * 处理插件视图存储过程的查询结果
-     * 包括分组聚合、排序、联动过滤、分页等处理
+     * <p>
+     * 该方法对存储过程返回的原始数据进行一系列后处理操作,包括:
+     * <ul>
+     * <li>构建坐标轴字段列表(散点图特殊处理,包含气泡字段)</li>
+     * <li>分组聚合处理(当Y轴字段不为空时)</li>
+     * <li>数据排序</li>
+     * <li>结果数量限制(自定义模式)</li>
+     * <li>列顺序重排</li>
+     * <li>联动过滤</li>
+     * <li>分页处理</li>
+     * </ul>
      *
-     * @param data 存储过程查询结果
-     * @param xAxis X轴字段列表
-     * @param yAxis Y轴字段列表
-     * @param view 图表视图
-     * @param chartExtRequest 图表扩展请求
-     * @return 处理后的数据
+     * @param data              存储过程查询结果,每一行代表一条记录,每个元素代表一个字段值
+     * @param xAxisForRequest   用于请求的X轴字段列表(非散点图场景)
+     * @param yAxisForRequest   用于请求的Y轴字段列表(非散点图场景)
+     * @param xAxis             X轴字段列表(散点图场景使用)
+     * @param yAxis             Y轴字段列表(散点图场景使用)
+     * @param view              图表视图对象,包含视图配置信息(类型、渲染方式、结果模式等)
+     * @param chartExtRequest   图表扩展请求对象,包含联动过滤、分页等参数
+     * @return 经过上述所有处理步骤后的最终数据
      */
     private List<String[]> handlePluginStoredProcedureData(
             List<String[]> data,
+            List<ChartViewFieldDTO> xAxisForRequest,
+            List<ChartViewFieldDTO> yAxisForRequest,
             List<ChartViewFieldDTO> xAxis,
             List<ChartViewFieldDTO> yAxis,
             ChartViewDTO view,
             ChartExtRequest chartExtRequest) {
 
+        // ============ 1. 数据空值校验 ============
         if (CollectionUtils.isEmpty(data)) {
             return data;
         }
 
+        // ============ 2. 构建坐标轴字段列表 ============
         List<ChartViewFieldDTO> axis = new ArrayList<>();
-        axis.addAll(xAxis);
-        axis.addAll(yAxis);
+        List<ChartViewFieldDTO> currentXAxis;
+        List<ChartViewFieldDTO> currentYAxis;
 
-        // 如果 yAxis 和 data 不为空，则进行分组和聚合处理
-        if (!yAxis.isEmpty() && !data.isEmpty()) {
-            data = handleStoredProcedureGroupAggregation(data, xAxis, yAxis);
+        // 判断是否为散点图(AntV或ECharts渲染)
+        if (StringUtils.containsIgnoreCase(view.getType(), "scatter")) {
+            // 散点图场景:使用专门的xAxis和yAxis参数
+            currentXAxis = xAxis;
+            currentYAxis = yAxis;
+
+            // 解析气泡字段(extBubble)
+            List<ChartViewFieldDTO> extBubble = gson.fromJson(view.getExtBubble(),
+                    new TypeToken<List<ChartViewFieldDTO>>() {}.getType());
+
+            // 构建完整的坐标轴字段列表: X轴 + Y轴 + 气泡字段
+            axis.addAll(xAxis);
+            axis.addAll(yAxis);
+            if (CollectionUtils.isNotEmpty(extBubble)) {
+                axis.addAll(extBubble);
+            }
+
+            // 构建用于分组聚合的Y轴字段列表: Y轴 + 气泡字段
+            List<ChartViewFieldDTO> yAxisForAggregation = new ArrayList<>(yAxis);
+            if (CollectionUtils.isNotEmpty(extBubble)) {
+                yAxisForAggregation.addAll(extBubble);
+            }
+
+            // ============ 3. 分组聚合处理(散点图) ============
+            // 当Y轴字段不为空且数据不为空时,执行分组聚合
+            if (CollectionUtils.isNotEmpty(yAxis) && CollectionUtils.isNotEmpty(data)) {
+                data = handleStoredProcedureGroupAggregation(data, xAxis, yAxisForAggregation);
+            }
+
+        } else {
+            // 非散点图场景:使用xAxisForRequest和yAxisForRequest参数
+            currentXAxis = xAxisForRequest;
+            currentYAxis = yAxisForRequest;
+
+            // 构建坐标轴字段列表: X轴 + Y轴
+            axis.addAll(xAxisForRequest);
+            axis.addAll(yAxisForRequest);
+
+            // ============ 3. 分组聚合处理(非散点图) ============
+            // 当Y轴字段不为空且数据不为空时,执行分组聚合
+            if (CollectionUtils.isNotEmpty(yAxisForRequest) && CollectionUtils.isNotEmpty(data)) {
+                data = handleStoredProcedureGroupAggregation(data, xAxisForRequest, yAxisForRequest);
+            }
         }
 
-        // 调用存储过程排序方法
+        // ============ 4. 数据排序 ============
+        // 根据坐标轴字段配置对数据进行排序
         sortStoredProcedureData(data, axis);
 
-        // 如果视图结果展示模式为自定义，则根据自定义的数量限制返回的数据条数
+        // ============ 5. 结果数量限制(自定义模式) ============
+        // 如果视图结果展示模式为"自定义",则根据配置的resultCount限制返回的数据条数
         if ("custom".equals(view.getResultMode())) {
-            // 根据resultCount限制返回的数据条数
             Integer resultCount = view.getResultCount();
             if (resultCount != null && resultCount > 0 && data.size() > resultCount) {
                 data = data.subList(0, resultCount);
             }
         }
 
-        // 根据 columnIndex 对 data 进行列重排序
+        // ============ 6. 列顺序重排 ============
+        // 根据字段配置的columnIndex对数据的列顺序进行调整,确保字段顺序与前端展示一致
         List<Integer> columnIndexList = axis.stream()
                 .map(ChartViewFieldDTO::getColumnIndex)
                 .collect(Collectors.toList());
 
         if (CollectionUtils.isNotEmpty(columnIndexList)) {
-            List<String[]> reorderedData = new ArrayList<>();
+            List<String[]> reorderedData = new ArrayList<>(data.size());
+
             for (String[] row : data) {
                 String[] newRow = new String[columnIndexList.size()];
+
+                // 按照指定的列索引顺序重新排列数据
                 for (int i = 0; i < columnIndexList.size(); i++) {
                     Integer originalIndex = columnIndexList.get(i);
+                    // 安全检查:确保原索引在行数据范围内
                     if (originalIndex != null && originalIndex < row.length) {
                         newRow[i] = row[originalIndex];
                     }
                 }
+
                 reorderedData.add(newRow);
             }
+
             data = reorderedData;
         }
 
-        // 处理存储过程联动过滤
+        // ============ 7. 联动过滤处理 ============
+        // 根据图表联动的过滤条件对数据进行筛选
         List<ChartExtFilterRequest> linkageFilters = chartExtRequest.getLinkageFilters();
         data = handleStoredProcedureLinkage(data, axis, linkageFilters);
 
-        // 分页处理
+        // ============ 8. 分页处理 ============
+        // 根据请求的页码和页大小进行分页截取
         Long goPage = chartExtRequest.getGoPage();
         Long pageSize = chartExtRequest.getPageSize();
+
         if (goPage != null && pageSize != null && data.size() > pageSize) {
             int startIndex = (int) ((goPage - 1) * pageSize);
             int endIndex = (int) Math.min(startIndex + pageSize, data.size());
+
+            // 确保起始索引在有效范围内
             if (startIndex < data.size()) {
                 data = data.subList(startIndex, endIndex);
             }
