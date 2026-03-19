@@ -1204,44 +1204,8 @@ public class ChartViewService {
                 data = pluginViewYOY(pluginViewParam, view, data, ds);
             } else {
                 // 存储过程查询：执行存储过程并进行后续处理
-                // 获取插件视图配置和数据表信息
-                PluginViewSet pluginViewSet = pluginViewParam.getPluginViewSet();
-                DataTableInfoDTO dataTableInfoDTO = new Gson().fromJson(pluginViewSet.getInfo(), DataTableInfoDTO.class);
-
-                // 获取存储过程SQL(支持Base64加密)
-                sql = dataTableInfoDTO.isBase64Encryption()
-                    ? new String(java.util.Base64.getDecoder().decode(dataTableInfoDTO.getSql()), StandardCharsets.UTF_8)
-                    : dataTableInfoDTO.getSql();
-
-                // 获取查询提供器,用于处理SQL变量
-                QueryProvider qp = ProviderFactory.getQueryProvider(ds.getType());
-
-                // 处理SQL中的变量参数(如${param_name}等动态参数)
-                sql = handleVariable(sql, chartExtRequest, qp, table, ds);
-
-                // 将空的参数替换为NULL(处理存储过程参数的默认值)
-                sql = dataSetTableService.replaceEmptyParamsWithNull(sql, DataSetTableService.SubstitutedParams);
-
-                // 记录最终的存储过程SQL(用于调试和日志追踪)
-                logger.info("plugin_storedProcedure:" + sql);
-
-                // 设置查询请求并执行存储过程
-                datasourceRequest.setQuery(sql);
-                data = datasourceProvider.getData(datasourceRequest);
-
-                // 构建 X 轴字段请求列表，合并基础 X 轴字段和扩展堆叠字段
-                List<ChartViewFieldDTO> xAxisForRequest = new ArrayList<>();
-                xAxisForRequest.addAll(xAxis);
-                xAxisForRequest.addAll(extStack);
-
-                // 构建 Y 轴字段请求列表
-                List<ChartViewFieldDTO> yAxisForRequest = new ArrayList<>();
-                yAxisForRequest.addAll(yAxis);
-
-
-                // 对存储过程的查询结果进行后处理
-                // 包括: 分组聚合、排序、列重排、联动过滤、分页等
-                data = handlePluginStoredProcedureData(data, xAxisForRequest, yAxisForRequest, xAxis, yAxis, view, chartExtRequest);
+                data = executePluginStoredProcedure(pluginViewParam, chartExtRequest, table, ds,
+                        datasourceRequest, datasourceProvider, xAxis, xAxisExt, extStack, yAxis, view);
             }
 
             // 请求正确的数据，然后取值
@@ -3397,6 +3361,14 @@ public class ChartViewService {
                     continue;
                 }
 
+                // 特殊处理：如果字段ID为"count"，则使用count聚合方式（计数统计）
+                // 这种情况下直接统计分组中的记录数量，不进行数值累加，将计数存储到数组到最后一个
+                if ("count".equalsIgnoreCase(yAxisField.getId())) {
+                    int count = rows.size();
+                    resultRow[yAxisColumnIndex] = String.valueOf(count);
+                    continue;
+                }
+
                 // 从所有行中提取该 yAxis 列的值
                 List<BigDecimal> values = new ArrayList<>();
                 for (String[] row : rows) {
@@ -3429,6 +3401,7 @@ public class ChartViewService {
      * @return 聚合后的数据（只有一行）
      */
     private List<String[]> aggregateWithoutGroup(List<String[]> data, List<ChartViewFieldDTO> yAxis) {
+        // 获取数据长度，因系统默认带记录数，所以数据长度+1
         int arrayLength = data.get(0).length;
         List<String[]> result = new ArrayList<>();
 
@@ -3445,6 +3418,12 @@ public class ChartViewService {
             }
 
             if (yAxisColumnIndex == null || yAxisColumnIndex < 0) {
+                continue;
+            }
+
+            // 当 Y 轴字段配置为计数统计时，将数据集合的大小转换为字符串并填入结果行的对应列位置
+            if ("count".equalsIgnoreCase(yAxisField.getId())){
+                resultRow[yAxisColumnIndex] = String.valueOf(data.size());
                 continue;
             }
 
@@ -3605,6 +3584,38 @@ public class ChartViewService {
             return data;
         }
 
+        // ============ 1.5 处理记录数字段 ============
+        // 如果yAxisForRequest不为空,则为每条数据新增一列用于记录数,初始值为"0"
+        if (CollectionUtils.isNotEmpty(yAxisForRequest)) {
+            // 计算新增列后的数据长度(当前行长度+1)
+            int newColumnIndex = data.get(0).length;
+
+            // 遍历所有数据行,每行末尾添加"0"作为记录数的初始值
+            for (int i = 0; i < data.size(); i++) {
+                String[] originalRow = data.get(i);
+                String[] newRow = Arrays.copyOf(originalRow, originalRow.length + 1);
+                newRow[originalRow.length] = "0";
+                data.set(i, newRow);
+            }
+
+            // 设置yAxisForRequest中id为"count"的字段的columnIndex
+            for (ChartViewFieldDTO field : yAxisForRequest) {
+                if ("count".equalsIgnoreCase(field.getId())) {
+                    field.setColumnIndex(newColumnIndex - 1);
+                }
+            }
+
+            // 同时设置yAxis中id为"count"的字段的columnIndex(如果yAxis不为空)
+            if (CollectionUtils.isNotEmpty(yAxis)) {
+                for (ChartViewFieldDTO field : yAxis) {
+                    if ("count".equalsIgnoreCase(field.getId())) {
+                        field.setColumnIndex(newColumnIndex - 1);
+                    }
+                }
+            }
+        }
+
+
         // ============ 2. 构建坐标轴字段列表 ============
         List<ChartViewFieldDTO> axis = new ArrayList<>();
         List<ChartViewFieldDTO> currentXAxis;
@@ -3683,8 +3694,7 @@ public class ChartViewService {
                 // 按照指定的列索引顺序重新排列数据
                 for (int i = 0; i < columnIndexList.size(); i++) {
                     Integer originalIndex = columnIndexList.get(i);
-                    // 安全检查:确保原索引在行数据范围内
-                    if (originalIndex != null && originalIndex < row.length) {
+                    if(originalIndex != null && originalIndex < row.length) {
                         newRow[i] = row[originalIndex];
                     }
                 }
@@ -3714,6 +3724,93 @@ public class ChartViewService {
                 data = data.subList(startIndex, endIndex);
             }
         }
+
+        return data;
+    }
+
+    /**
+     * 执行插件视图存储过程查询
+     * <p>
+     * 该方法负责处理插件视图的存储过程调用,包括:
+     * <ul>
+     * <li>获取并解析存储过程SQL(支持Base64加密)</li>
+     * <li>处理SQL中的变量参数</li>
+     * <li>将空参数替换为NULL</li>
+     * <li>执行存储过程查询</li>
+     * <li>构建坐标轴字段列表</li>
+     * <li>对查询结果进行后处理</li>
+     * </ul>
+     *
+     * @param pluginViewParam     插件视图参数对象,包含视图配置和数据表信息
+     * @param chartExtRequest     图表扩展请求对象,包含过滤、分页等参数
+     * @param table               数据集表对象
+     * @param ds                  数据源对象
+     * @param datasourceRequest   数据源请求对象
+     * @param datasourceProvider  数据源提供者对象
+     * @param xAxis               X轴字段列表
+     * @param xAxisExt            X轴扩展字段列表
+     * @param extStack            扩展堆叠字段列表
+     * @param yAxis               Y轴字段列表
+     * @param view                图表视图对象
+     * @return 存储过程查询结果数据
+     * @throws Exception 执行过程中可能抛出的异常
+     */
+    private List<String[]> executePluginStoredProcedure(
+            PluginViewParam pluginViewParam,
+            ChartExtRequest chartExtRequest,
+            DataSetTableDTO table,
+            Datasource ds,
+            DatasourceRequest datasourceRequest,
+            Provider datasourceProvider,
+            List<ChartViewFieldDTO> xAxis,
+            List<ChartViewFieldDTO> xAxisExt,
+            List<ChartViewFieldDTO> extStack,
+            List<ChartViewFieldDTO> yAxis,
+            ChartViewDTO view) throws Exception {
+
+        // 获取插件视图配置和数据表信息
+        PluginViewSet pluginViewSet = pluginViewParam.getPluginViewSet();
+        DataTableInfoDTO dataTableInfoDTO = new Gson().fromJson(pluginViewSet.getInfo(), DataTableInfoDTO.class);
+
+        // 获取存储过程SQL(支持Base64加密)
+        String sql = dataTableInfoDTO.isBase64Encryption()
+                ? new String(java.util.Base64.getDecoder().decode(dataTableInfoDTO.getSql()), StandardCharsets.UTF_8)
+                : dataTableInfoDTO.getSql();
+
+        // 获取查询提供器,用于处理SQL变量
+        QueryProvider qp = ProviderFactory.getQueryProvider(ds.getType());
+
+        // 处理SQL中的变量参数(如${param_name}等动态参数)
+        sql = handleVariable(sql, chartExtRequest, qp, table, ds);
+
+        // 将空的参数替换为NULL(处理存储过程参数的默认值)
+        sql = dataSetTableService.replaceEmptyParamsWithNull(sql, DataSetTableService.SubstitutedParams);
+
+        // 记录最终的存储过程SQL(用于调试和日志追踪)
+        logger.info("plugin_storedProcedure:" + sql);
+
+        // 设置查询请求并执行存储过程
+        datasourceRequest.setQuery(sql);
+        List<String[]> data = datasourceProvider.getData(datasourceRequest);
+
+        // 构建 X 轴字段请求列表，合并基础 X 轴字段和扩展堆叠字段
+        List<ChartViewFieldDTO> xAxisForRequest = new ArrayList<>();
+        xAxisForRequest.addAll(xAxis);
+        xAxisForRequest.addAll(extStack);
+
+        // 构建 Y 轴字段请求列表
+        List<ChartViewFieldDTO> yAxisForRequest = new ArrayList<>();
+        yAxisForRequest.addAll(yAxis);
+
+        // 对于非竞赛条形图(race-bar)类型，将X轴扩展字段添加到请求列表中
+        // race-bar图表需要动态变化的X轴字段，因此不添加扩展字段以保持其特殊性
+        if (!StringUtils.equals(view.getType(), "race-bar")) {
+            xAxisForRequest.addAll(xAxisExt);
+        }
+
+        // 对存储过程的查询结果进行后处理
+        // 包括: 分组聚合、排序、列重排、联动过滤、分页等
+        data = handlePluginStoredProcedureData(data, xAxisForRequest, yAxisForRequest, xAxis, yAxis, view, chartExtRequest);
 
         return data;
     }
