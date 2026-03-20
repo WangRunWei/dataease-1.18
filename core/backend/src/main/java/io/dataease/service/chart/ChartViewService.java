@@ -3601,7 +3601,7 @@ public class ChartViewService {
             // 设置yAxisForRequest中id为"count"的字段的columnIndex
             for (ChartViewFieldDTO field : yAxisForRequest) {
                 if ("count".equalsIgnoreCase(field.getId())) {
-                    field.setColumnIndex(newColumnIndex - 1);
+                    field.setColumnIndex(newColumnIndex);
                 }
             }
 
@@ -3609,7 +3609,7 @@ public class ChartViewService {
             if (CollectionUtils.isNotEmpty(yAxis)) {
                 for (ChartViewFieldDTO field : yAxis) {
                     if ("count".equalsIgnoreCase(field.getId())) {
-                        field.setColumnIndex(newColumnIndex - 1);
+                        field.setColumnIndex(newColumnIndex);
                     }
                 }
             }
