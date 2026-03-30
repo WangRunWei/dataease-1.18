@@ -701,8 +701,8 @@ public class DataSetTableService {
                 if (isStoredProcedureCall(sql, ds.getType())) {
                     // 存储过程变量取真实数据
                     sql = handleVariableDefaultValue(sql, datasetTable.getSqlVariableDetails(), ds.getType(), true);
-                    // 如果参数的真实数据为空，则将参数替换为NULL
-                    sql = replaceEmptyParamsWithNull(sql, SubstitutedParams);
+                    // 存储过程格式处理（替换空参数、处理数组参数）
+                    sql = storedProcedureFormatProcess(sql, SubstitutedParams, ds.getType());
 
                     // 存储过程调用：直接使用原始SQL，在Java中实现分页
                     datasourceRequest.setQuery(sql);
@@ -1402,8 +1402,9 @@ public class DataSetTableService {
         // 检测是否是存储过程调用，如果是则直接执行原始SQL，不通过createSQLPreview包装
         String sqlAsTable;
         if (isStoredProcedureCall(sql, ds.getType())) {
-            // 存储过程调用：直接使用原始SQL, 如果存储过程参数为空，则替换为null
-            sqlAsTable = replaceEmptyParamsWithNull(sql, SubstitutedParams);
+            // 存储过程调用：直接使用原始SQL, 进行格式处理（替换空参数、处理数组参数）
+            sqlAsTable = storedProcedureFormatProcess(sql, SubstitutedParams, ds.getType());
+
         } else {
             // 普通查询：使用createSQLPreview包装
             sqlAsTable = qp.createSQLPreview(sql, null);
@@ -1484,10 +1485,11 @@ public class DataSetTableService {
             return trimmedSql.matches("CALL\\s+[\\w.]+\\s*\\(.*\\).*");
         }
 
-        // PostgreSQL: SELECT * FROM 存储过程名(参数1, 参数2, ...);
+        // PostgreSQL: CALL 存储过程名(参数1, 参数2, ...) 或 SELECT * FROM 函数名(参数1, 参数2, ...);
         if ("pg".equalsIgnoreCase(datasourceType)) {
-            // 检测是否是 SELECT * FROM function_name(...) 格式
-            return trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
+            // 检测是否是 CALL procedure_name(...) 或 SELECT * FROM function_name(...) 格式
+            return trimmedSql.matches("CALL\\s+[\\w.]+\\s*\\(.*\\).*")
+                    || trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
         }
 
         // SQL Server: EXEC 存储过程名 参数1, 参数2, ...;
@@ -2056,8 +2058,8 @@ public class DataSetTableService {
             if (isStoredProcedureCall(sql, ds.getType())) {
                 // 存储过程调用：直接使用原始SQL，SQL中的参数设置为真实参数
                 sql = handleVariableDefaultValue(sql, dataSetTableRequest.getSqlVariableDetails(), ds.getType(), true);
-                // 如果有参数未设置真实值则将参数值设置为null
-                sqlAsTable = replaceEmptyParamsWithNull(sql, SubstitutedParams);
+                // 存储过程格式处理（替换空参数、处理数组参数）
+                sqlAsTable = storedProcedureFormatProcess(sql, SubstitutedParams, ds.getType());
             } else {
 
                 sql = removeVariables(sql, ds.getType()).replaceAll(SubstitutedSql.trim(), SubstitutedSqlVirtualData);
@@ -3223,6 +3225,354 @@ public class DataSetTableService {
         // 替换双引号包裹的参数："DATAEASE_PATAMS_BI" -> null
         sql = sql.replace("\"" + substitutedParams + "\"", "null");
         return sql;
+    }
+
+    /**
+     * 存储过程格式处理
+     * 1. 替换空参数为null
+     * 2. 如果是PostgreSQL，处理数组参数格式
+     *
+     * @param sql SQL语句
+     * @param substitutedParams 未设置值的参数
+     * @param datasourceType 数据源类型
+     * @return 处理后的SQL语句
+     */
+    public String storedProcedureFormatProcess(String sql, String substitutedParams, String datasourceType) {
+        // 替换空参数为null
+        sql = replaceEmptyParamsWithNull(sql, substitutedParams);
+
+        // 如果是PostgreSQL，处理数组参数格式
+        if ("pg".equalsIgnoreCase(datasourceType)) {
+            sql = pgsqlArrayFormatProcess(sql);
+        }
+
+        return sql;
+    }
+
+    /**
+     * PostgreSQL存储过程数组参数格式处理
+     * 将双引号包裹的数组参数转换为PostgreSQL数组格式
+     * 例如：
+     * 1. "('收入','投资')" -> '(''收入'',''投资'')'
+     * 2. "(15000.00,850.50)" -> '(15000.00,850.50)'
+     * 3. "('收入')" -> '(''收入'')'
+     * 4. "(1)" -> '(1)'
+     *
+     * 只处理双引号包裹的数组参数，其他格式保持不变
+     *
+     * @param sql SQL语句
+     * @return 处理后的SQL语句
+     */
+    public String pgsqlArrayFormatProcess(String sql) {
+        if (StringUtils.isEmpty(sql)) {
+            return sql;
+        }
+
+        // 只处理双引号包裹的数组参数
+        sql = processDoubleQuotedArrays(sql);
+
+        return sql;
+    }
+
+    /**
+     * 处理双引号包裹的数组参数
+     * 支持单元素和多元素数组
+     * 例如：
+     * - "('收入','投资')" -> '(''收入'',''投资'')'
+     * - "('收入')" -> '(''收入'')'
+     * - "(1,2)" -> '(1,2)'
+     * - "(1)" -> '(1)'
+     */
+    private String processDoubleQuotedArrays(String sql) {
+        StringBuilder result = new StringBuilder();
+        int length = sql.length();
+        int i = 0;
+
+        while (i < length) {
+            char c = sql.charAt(i);
+
+            // 查找双引号
+            if (c == '"') {
+                int endQuoteIndex = findClosingQuote(sql, i, '"');
+                if (endQuoteIndex == -1) {
+                    // 没有匹配的右引号，保持原样
+                    result.append(c);
+                    i++;
+                    continue;
+                }
+
+                // 提取双引号内的内容
+                String quotedContent = sql.substring(i + 1, endQuoteIndex);
+
+                // 检查是否是数组格式：以括号开头
+                String trimmedContent = quotedContent.trim();
+                if (trimmedContent.startsWith("(") && trimmedContent.endsWith(")")) {
+                    // 提取括号内的内容
+                    String innerContent = trimmedContent.substring(1, trimmedContent.length() - 1);
+
+                    // 检查是否为空或包含逗号（数组特征）
+                    if (!innerContent.trim().isEmpty() && (innerContent.contains(",") || isArrayElement(innerContent.trim()))) {
+                        // 处理双引号包裹的数组参数
+                        String processed = processDoubleQuotedArrayParams(trimmedContent);
+                        result.append(processed);
+                    } else {
+                        // 不是数组参数，保持原样
+                        result.append(sql.substring(i, endQuoteIndex + 1));
+                    }
+                } else {
+                    // 不是数组参数，保持原样
+                    result.append(sql.substring(i, endQuoteIndex + 1));
+                }
+                i = endQuoteIndex + 1;
+            } else {
+                result.append(c);
+                i++;
+            }
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * 检查是否是数组元素（单引号字符串或数字）
+     */
+    private boolean isArrayElement(String content) {
+        // 单引号包裹的字符串
+        if (content.startsWith("'") && content.endsWith("'")) {
+            return true;
+        }
+        // 数字（整数或小数）
+        if (content.matches("\\d+(\\.\\d+)?")) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 处理直接传递的数组参数（函数参数列表中的数组）
+     * 例如：CALL my_proc('收入','投资') 中的 ('收入','投资')
+     * 支持单元素和多元素数组
+     */
+    private String processDirectArrays(String sql) {
+        StringBuilder result = new StringBuilder();
+        int length = sql.length();
+        int i = 0;
+
+        while (i < length) {
+            char c = sql.charAt(i);
+
+            // 查找左括号（可能是函数调用的参数列表）
+            if (c == '(') {
+                // 找到匹配的右括号
+                int endIndex = findMatchingParenthesis(sql, i);
+                if (endIndex == -1) {
+                    result.append(c);
+                    i++;
+                    continue;
+                }
+
+                // 提取括号内的内容
+                String innerContent = sql.substring(i + 1, endIndex);
+
+                // 检查是否是数组参数（包含逗号，或者内容不为空）
+                boolean isArray = false;
+                boolean isStringArray = true;
+                boolean alreadyConverted = false;
+
+                if (innerContent.contains(",")) {
+                    // 多元素数组
+                    isArray = true;
+                    String[] paramArray = innerContent.split(",");
+                    for (String param : paramArray) {
+                        String trimmedParam = param.trim();
+                        // 如果参数不是单引号包裹的字符串，则不是字符串数组
+                        if (!trimmedParam.startsWith("'") || !trimmedParam.endsWith("'")) {
+                            isStringArray = false;
+                            break;
+                        }
+                        // 检查是否已经转换过（即包含双单引号）
+                        if (trimmedParam.contains("''")) {
+                            alreadyConverted = true;
+                        }
+                    }
+                } else if (!innerContent.trim().isEmpty()) {
+                    // 单元素数组：内容不为空且没有逗号
+                    String trimmedParam = innerContent.trim();
+                    // 检查是否是单引号包裹的字符串或数字
+                    if ((trimmedParam.startsWith("'") && trimmedParam.endsWith("'")) ||
+                        trimmedParam.matches("\\d+(\\.\\d+)?")) {
+                        isArray = true;
+                        // 检查是否已经转换过
+                        if (trimmedParam.contains("''")) {
+                            alreadyConverted = true;
+                        }
+                        // 如果是单引号包裹的字符串，标记为字符串数组
+                        if (trimmedParam.startsWith("'") && trimmedParam.endsWith("'")) {
+                            isStringArray = true;
+                        } else {
+                            isStringArray = false;
+                        }
+                    }
+                }
+
+                // 如果是数组且未转换过，则进行转换
+                if (isArray && !alreadyConverted) {
+                    String processed;
+                    if (isStringArray) {
+                        // 处理字符串数组
+                        processed = processArrayParams(innerContent);
+                        result.append("'(").append(processed).append(")'");
+                    } else {
+                        // 数值数组，直接包裹单引号
+                        result.append("'(").append(innerContent).append(")'");
+                    }
+                    i = endIndex + 1;
+                    continue;
+                }
+
+                // 不是数组参数或已转换过，保持原样
+                result.append(c);
+                i++;
+            } else {
+                result.append(c);
+                i++;
+            }
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * 找到匹配的右引号
+     * @param sql SQL语句
+     * @param startIndex 左引号的位置
+     * @param quote 引号类型（单引号或双引号）
+     * @return 匹配的右引号位置，如果没有找到返回-1
+     */
+    private int findClosingQuote(String sql, int startIndex, char quote) {
+        for (int i = startIndex + 1; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (c == quote) {
+                // 检查是否是转义的引号
+                if (i > 0 && sql.charAt(i - 1) != '\\') {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 找到匹配的右括号
+     * @param sql SQL语句
+     * @param startIndex 左括号的位置
+     * @return 匹配的右括号位置，如果没有找到返回-1
+     */
+    private int findMatchingParenthesis(String sql, int startIndex) {
+        int depth = 0;
+        for (int i = startIndex; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 处理数组参数
+     * @param params 逗号分隔的参数字符串
+     * @return 处理后的参数字符串
+     */
+    private String processArrayParams(String params) {
+        String[] paramArray = params.split(",");
+        StringBuilder processedParams = new StringBuilder();
+
+        for (int i = 0; i < paramArray.length; i++) {
+            String param = paramArray[i].trim();
+
+            // 如果参数被单引号包裹，说明是字符串类型
+            // 需要将单引号转义：'值' -> ''值''
+            if (param.startsWith("'") && param.endsWith("'")) {
+                // 去除外层单引号
+                String innerValue = param.substring(1, param.length() - 1);
+                // 添加转义后的单引号
+                processedParams.append("''").append(innerValue).append("''");
+            } else {
+                // 数值类型直接使用
+                processedParams.append(param);
+            }
+
+            // 添加逗号分隔符（除了最后一个参数）
+            if (i < paramArray.length - 1) {
+                processedParams.append(",");
+            }
+        }
+
+        return processedParams.toString();
+    }
+
+    /**
+     * 处理双引号包裹的数组参数
+     * 支持单元素和多元素数组
+     * 例如：
+     * - "('收入','投资')" -> '(''收入'',''投资'')'
+     * - "('收入')" -> '(''收入'')'
+     * - "(1,2)" -> '(1,2)'
+     * - "(1)" -> '(1)'
+     *
+     * @param params 双引号包裹的参数字符串
+     * @return 处理后的参数字符串
+     */
+    private String processDoubleQuotedArrayParams(String params) {
+        // 去除可能存在的外层双引号
+        String trimmedParams = params.trim();
+        if (trimmedParams.startsWith("\"") && trimmedParams.endsWith("\"")) {
+            trimmedParams = trimmedParams.substring(1, trimmedParams.length() - 1);
+        }
+
+        // 检查是否包含数组格式的括号
+        if (trimmedParams.startsWith("(") && trimmedParams.endsWith(")")) {
+            // 提取括号内的内容
+            String innerContent = trimmedParams.substring(1, trimmedParams.length() - 1);
+
+            // 检查是否包含逗号（多元素数组）或者是单元素
+            if (innerContent.contains(",")) {
+                // 多元素数组：处理数组参数，将 '收入' -> ''收入''
+                String processed = processArrayParams(innerContent);
+                // 返回格式：'(''收入'',''投资'')'
+                return "'(" + processed + ")'";
+            } else if (!innerContent.trim().isEmpty()) {
+                // 单元素数组
+                String trimmedElement = innerContent.trim();
+                if (trimmedElement.startsWith("'") && trimmedElement.endsWith("'")) {
+                    // 字符串元素：需要转义单引号
+                    // 输入：'收入'，期望输出：'(''收入'')'
+                    // 在Java中构造：'(' + '' + 收入 + '' + ')
+                    String innerValue = trimmedElement.substring(1, trimmedElement.length() - 1);
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("'");  // 外层单引号开始
+                    sb.append("(");  // 左括号
+                    sb.append("''"); // 转义的单引号
+                    sb.append(innerValue); // 内容
+                    sb.append("''"); // 转义的单引号
+                    sb.append(")");  // 右括号
+                    sb.append("'");  // 外层单引号结束
+                    return sb.toString();
+                } else {
+                    // 数值元素：1 -> 1
+                    return "'(" + innerContent + ")'";
+                }
+            }
+        }
+
+        // 如果不是数组格式，返回原参数
+        return params;
     }
 
 

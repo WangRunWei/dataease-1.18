@@ -1365,8 +1365,8 @@ public class ChartViewService {
                         }
                     }
                 } else {
-                    // 存储过程调用：直接使用原始SQL，将参数都替换成空，不通过QueryProvider包装
-                    querySql = dataSetTableService.replaceEmptyParamsWithNull(sql, dataSetTableService.SubstitutedParams);
+                    // 存储过程调用：直接使用原始SQL，进行格式处理（替换空参数、处理数组参数）
+                    querySql = dataSetTableService.storedProcedureFormatProcess(sql, dataSetTableService.SubstitutedParams, ds.getType());
                 }
             } else if (StringUtils.equalsIgnoreCase(table.getType(), DatasetType.CUSTOM.name())) {
                 DataTableInfoDTO dt = gson.fromJson(table.getInfo(), DataTableInfoDTO.class);
@@ -3270,9 +3270,10 @@ public class ChartViewService {
         if ("mysql".equalsIgnoreCase(datasourceType)) {
             return trimmedSql.matches("CALL\\s+[\\w.]+\\s*\\(.*\\).*");
         }
-        // PostgreSQL: SELECT * FROM 存储过程名(参数1, 参数2, ...);
+        // PostgreSQL: CALL 存储过程名(参数1, 参数2, ...) 或 SELECT * FROM 函数名(参数1, 参数2, ...);
         if ("pg".equalsIgnoreCase(datasourceType)) {
-            return trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
+            return trimmedSql.matches("CALL\\s+[\\w.]+\\s*\\(.*\\).*")
+                    || trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
         }
         // SQL Server: EXEC 存储过程名 参数1, 参数2, ...;
         if ("sqlServer".equalsIgnoreCase(datasourceType)) {
@@ -3783,8 +3784,8 @@ public class ChartViewService {
         // 处理SQL中的变量参数(如${param_name}等动态参数)
         sql = handleVariable(sql, chartExtRequest, qp, table, ds);
 
-        // 将空的参数替换为NULL(处理存储过程参数的默认值)
-        sql = dataSetTableService.replaceEmptyParamsWithNull(sql, DataSetTableService.SubstitutedParams);
+        // 存储过程格式处理（替换空参数、处理数组参数）
+        sql = dataSetTableService.storedProcedureFormatProcess(sql, DataSetTableService.SubstitutedParams, ds.getType());
 
         // 记录最终的存储过程SQL(用于调试和日志追踪)
         logger.info("plugin_storedProcedure:" + sql);

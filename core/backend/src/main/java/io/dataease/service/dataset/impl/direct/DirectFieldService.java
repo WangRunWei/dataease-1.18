@@ -190,8 +190,8 @@ public class DirectFieldService implements DataSetFieldService {
                 sql = dataSetTableService.handleVariableDefaultValue(sql, null, ds.getType(), false);
                 // 检测是否是存储过程调用
                 if (dataSetTableService.isStoredProcedureCall(sql, ds.getType())) {
-                    // 对于存储过程，直接使用SQL，不需要包装为临时表查询, 将存储过程参数替换为null
-                    createSQL = dataSetTableService.replaceEmptyParamsWithNull(sql, DataSetTableService.SubstitutedParams);
+                    // 对于存储过程，直接使用SQL，不需要包装为临时表查询, 进行格式处理
+                    createSQL = dataSetTableService.storedProcedureFormatProcess(sql, DataSetTableService.SubstitutedParams, ds.getType());
                 } else {
                     // 普通查询SQL：使用createSQLAsTmp包装
                     createSQL = qp.createQuerySQLAsTmp(sql, permissionFields, !needSort, customFilter, rowPermissionsTree, deSortFields, calcLimit, keyword);
