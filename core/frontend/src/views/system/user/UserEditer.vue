@@ -360,7 +360,7 @@ export default {
       userRoles: [],
       formType: 'add',
       isPluginLoaded: false,
-      defaultPWD: 'DataEase123..',
+      defaultPWD: 'ASD2014',
       dialogVisible: false,
       wecomOpen: false,
       dingTalkOpen: false,

@@ -426,6 +426,9 @@
               <i class="el-icon-info" />
               {{ $t('dataset.sql_variable_limit_1') }}<br>
               {{ $t('dataset.sql_variable_limit_2') }}<br>
+              {{ $t('dataset.sql_variable_limit_3') }}<br>
+              {{ $t('dataset.sql_variable_limit_4') }}<br>
+              {{ $t('dataset.sql_variable_limit_5') }}<br>
             </div>
             <el-table :data="variablesTmp">
               <el-table-column
@@ -1220,14 +1223,14 @@ export default {
   }
 
   .content {
-    height: 62px;
+    height: 130px;
     width: 822px;
     border-radius: 4px;
     background: #e1eaff;
     position: relative;
     padding: 9px 0 9px 40px;
     font-family: AlibabaPuHuiTi;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 400;
 
     i {

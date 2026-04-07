@@ -399,7 +399,7 @@ export default {
       userRoles: [],
       orderConditions: [],
       isPluginLoaded: false,
-      defaultPWD: 'DataEase123..',
+      defaultPWD: 'ASD2014..',
       canLoadDom: false,
       showScroll: false,
       resizeForFilter: null,

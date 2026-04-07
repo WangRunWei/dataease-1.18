@@ -3270,10 +3270,9 @@ public class ChartViewService {
         if ("mysql".equalsIgnoreCase(datasourceType)) {
             return trimmedSql.matches("CALL\\s+[\\w.]+\\s*\\(.*\\).*");
         }
-        // PostgreSQL: CALL 存储过程名(参数1, 参数2, ...) 或 SELECT * FROM 函数名(参数1, 参数2, ...);
+        // PostgreSQL: SELECT * FROM 函数名(参数1, 参数2, ...);
         if ("pg".equalsIgnoreCase(datasourceType)) {
-            return trimmedSql.matches("CALL\\s+[\\w.]+\\s*\\(.*\\).*")
-                    || trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
+            return trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
         }
         // SQL Server: EXEC 存储过程名 参数1, 参数2, ...;
         if ("sqlServer".equalsIgnoreCase(datasourceType)) {

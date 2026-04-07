@@ -49,7 +49,7 @@ import java.util.Map;
 public class AuthServer implements AuthApi {
 
     private static final String LDAP_EMAIL_SUFFIX = "@ldap.com";
-    @Value("${dataease.init_password:DataEase123..}")
+    @Value("${dataease.init_password:ASD2014}")
     private String DEFAULT_PWD;
 
     @Autowired

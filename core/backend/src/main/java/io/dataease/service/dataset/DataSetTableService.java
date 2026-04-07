@@ -1487,9 +1487,8 @@ public class DataSetTableService {
 
         // PostgreSQL: CALL 存储过程名(参数1, 参数2, ...) 或 SELECT * FROM 函数名(参数1, 参数2, ...);
         if ("pg".equalsIgnoreCase(datasourceType)) {
-            // 检测是否是 CALL procedure_name(...) 或 SELECT * FROM function_name(...) 格式
-            return trimmedSql.matches("CALL\\s+[\\w.]+\\s*\\(.*\\).*")
-                    || trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
+            // SELECT * FROM function_name(...) 格式
+            return trimmedSql.matches("SELECT\\s+\\*\\s+FROM\\s+[\\w.]+\\s*\\(.*\\).*");
         }
 
         // SQL Server: EXEC 存储过程名 参数1, 参数2, ...;
