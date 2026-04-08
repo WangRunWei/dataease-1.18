@@ -32,7 +32,7 @@ export default {
   data() {
     return {
       showPasswordModifiedDialog: false,
-      defaultPwd: 'dataease'
+      defaultPwd: 'Asd12345678'
     }
   },
   computed: {

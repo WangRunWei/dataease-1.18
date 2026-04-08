@@ -399,7 +399,7 @@ export default {
       userRoles: [],
       orderConditions: [],
       isPluginLoaded: false,
-      defaultPWD: 'ASD2014..',
+      defaultPWD: 'Asd12345678',
       canLoadDom: false,
       showScroll: false,
       resizeForFilter: null,
