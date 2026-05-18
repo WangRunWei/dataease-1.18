@@ -1205,7 +1205,7 @@ public class ChartViewService {
             } else {
                 // 存储过程查询：执行存储过程并进行后续处理
                 data = executePluginStoredProcedure(pluginViewParam, chartExtRequest, table, ds,
-                        datasourceRequest, datasourceProvider, xAxis, xAxisExt, extStack, yAxis, view);
+                        datasourceRequest, datasourceProvider, xAxis, xAxisExt, extStack, yAxis, view, drillFilters);
             }
 
             // 请求正确的数据，然后取值
@@ -1473,13 +1473,14 @@ public class ChartViewService {
 
             data = datasourceProvider.getData(datasourceRequest);
 
-            // 对存储过程的查询结果进行分页处理（存储过程在 SQL 层无法分页，需要在 Java 层分页）
+            // 对存储过程的查询结果进行分页处理（存储过程在 SQL 层无法、
+            // 分页，需要在 Java 层分页）
             if (isStoredProcedure && StringUtils.equalsIgnoreCase(table.getType(), DatasetType.SQL.name())) {
                 // 在分页前保存数据总数，用于计算分页信息
                 int dataBeforePagination = data.size();
 
                 // 调用统一的存储过程数据处理方法
-                data = handlePluginStoredProcedureData(data, xAxisForRequest,yAxisForRequest, xAxis, yAxis, view, chartExtRequest);
+                data = handleStoredProcedureData(data, xAxisForRequest,yAxisForRequest, xAxis, yAxis, view, chartExtRequest, drillFilters);
 
                 // 计算分页信息（只有在需要分页时才计算）
                 Long goPage = chartExtRequest.getGoPage();
@@ -1890,6 +1891,7 @@ public class ChartViewService {
             } else if (StringUtils.equalsIgnoreCase(view.getType(), "bar-group-stack")) {
                 mapChart = ChartDataBuild.transGroupStackDataAntV(xAxisBase, xAxis, xAxisExt, yAxis, extStack, data, view, isDrill);
             } else if (StringUtils.equalsIgnoreCase(view.getType(), "bar-time-range")) {
+
                 mapChart = ChartDataBuild.transTimeBarDataAntV(xAxisBase, xAxis, xAxisExt, yAxis, extStack, data, view, isDrill, drillRequestList);
             } else if (StringUtils.containsIgnoreCase(view.getType(), "bar-stack")) {
                 mapChart = ChartDataBuild.transStackChartDataAntV(xAxis, yAxis, view, data, extStack, isDrill);
@@ -3548,7 +3550,7 @@ public class ChartViewService {
     }
 
     /**
-     * 处理插件视图存储过程的查询结果
+     * 处理视图存储过程的查询结果
      * <p>
      * 该方法对存储过程返回的原始数据进行一系列后处理操作,包括:
      * <ul>
@@ -3570,21 +3572,80 @@ public class ChartViewService {
      * @param chartExtRequest   图表扩展请求对象,包含联动过滤、分页等参数
      * @return 经过上述所有处理步骤后的最终数据
      */
-    private List<String[]> handlePluginStoredProcedureData(
+    private List<String[]> handleStoredProcedureData(
             List<String[]> data,
             List<ChartViewFieldDTO> xAxisForRequest,
             List<ChartViewFieldDTO> yAxisForRequest,
             List<ChartViewFieldDTO> xAxis,
             List<ChartViewFieldDTO> yAxis,
             ChartViewDTO view,
-            ChartExtRequest chartExtRequest) {
+            ChartExtRequest chartExtRequest,
+            List<ChartExtFilterRequest> drillFilters
+            ) {
 
-        // ============ 1. 数据空值校验 ============
+        // ============ 数据空值校验 ============
         if (CollectionUtils.isEmpty(data)) {
             return data;
         }
 
-        // ============ 1.5 处理记录数字段 ============
+        // ============ 下钻过滤处理 ============
+        // 遍历所有下钻过滤条件，对数据进行层层过滤
+        for (ChartExtFilterRequest drillFilter : drillFilters) {
+            // 获取过滤条件中的字段信息
+            DatasetTableField datasetTableField = drillFilter.getDatasetTableField();
+
+            // 如果字段为空，跳过该过滤条件
+            if (datasetTableField == null) {
+                continue;
+            }
+
+            // 获取要过滤的列索引（该字段在数据行中的位置）
+            Integer columnIndex = datasetTableField.getColumnIndex();
+
+            // 获取过滤值列表（IN条件的值集合）
+            List<String> value = drillFilter.getValue();
+
+            // ============ 参数有效性校验 ============
+            // 只有当列索引有效且过滤值列表不为空时，才执行过滤操作
+            if (columnIndex == null || columnIndex < 0) {
+                // 列索引无效，跳过该过滤条件
+                continue;
+            }
+
+            if (CollectionUtils.isEmpty(value)) {
+                // 过滤值列表为空，跳过该过滤条件
+                continue;
+            }
+
+            // ============ IN条件过滤 ============
+            // 使用Java Stream API进行过滤，保留符合条件的行
+            // 过滤条件：数据行中指定列的值必须在过滤值列表中（SQL中的IN逻辑）
+            final Integer filterColumnIndex = columnIndex;
+            final List<String> filterValues = value;
+
+            data = data.stream()
+                .filter(row -> {
+                    // 边界检查：确保行长度足够，避免数组越界
+                    if (row == null || row.length <= filterColumnIndex) {
+                        return false;
+                    }
+
+                    // 获取当前行在过滤列的值
+                    String cellValue = row[filterColumnIndex];
+
+                    // IN条件判断：检查单元格的值是否在过滤值列表中
+                    // 相当于SQL中的: WHERE column IN (value1, value2, ...)
+                    return filterValues.contains(cellValue);
+                })
+                .collect(Collectors.toList());
+
+            // 如果过滤后数据为空，提前结束后续过滤（提升性能）
+            if (CollectionUtils.isEmpty(data)) {
+                break;
+            }
+        }
+
+        // ============ 处理记录数字段 ============
         // 如果yAxisForRequest不为空,则为每条数据新增一列用于记录数,初始值为"0"
         if (CollectionUtils.isNotEmpty(yAxisForRequest)) {
             // 计算新增列后的数据长度(当前行长度+1)
@@ -3616,7 +3677,7 @@ public class ChartViewService {
         }
 
 
-        // ============ 2. 构建坐标轴字段列表 ============
+        // ============ 构建坐标轴字段列表 ============
         List<ChartViewFieldDTO> axis = new ArrayList<>();
         List<ChartViewFieldDTO> currentXAxis;
         List<ChartViewFieldDTO> currentYAxis;
@@ -3644,7 +3705,7 @@ public class ChartViewService {
                 yAxisForAggregation.addAll(extBubble);
             }
 
-            // ============ 3. 分组聚合处理(散点图) ============
+            // ============ 分组聚合处理(散点图) ============
             // 当Y轴字段不为空且数据不为空时,执行分组聚合
             if (CollectionUtils.isNotEmpty(yAxis) && CollectionUtils.isNotEmpty(data)) {
                 data = handleStoredProcedureGroupAggregation(data, xAxis, yAxisForAggregation);
@@ -3659,18 +3720,18 @@ public class ChartViewService {
             axis.addAll(xAxisForRequest);
             axis.addAll(yAxisForRequest);
 
-            // ============ 3. 分组聚合处理(非散点图) ============
+            // ============ 分组聚合处理(非散点图) ============
             // 当Y轴字段不为空且数据不为空时,执行分组聚合
             if (CollectionUtils.isNotEmpty(yAxisForRequest) && CollectionUtils.isNotEmpty(data)) {
                 data = handleStoredProcedureGroupAggregation(data, xAxisForRequest, yAxisForRequest);
             }
         }
 
-        // ============ 4. 数据排序 ============
+        // ============ 数据排序 ============
         // 根据坐标轴字段配置对数据进行排序
         sortStoredProcedureData(data, axis);
 
-        // ============ 5. 结果数量限制(自定义模式) ============
+        // ============ 结果数量限制(自定义模式) ============
         // 如果视图结果展示模式为"自定义",则根据配置的resultCount限制返回的数据条数
         if ("custom".equals(view.getResultMode())) {
             Integer resultCount = view.getResultCount();
@@ -3679,7 +3740,7 @@ public class ChartViewService {
             }
         }
 
-        // ============ 6. 列顺序重排 ============
+        // ============ 列顺序重排 ============
         // 根据字段配置的columnIndex对数据的列顺序进行调整,确保字段顺序与前端展示一致
         List<Integer> columnIndexList = axis.stream()
                 .map(ChartViewFieldDTO::getColumnIndex)
@@ -3705,12 +3766,12 @@ public class ChartViewService {
             data = reorderedData;
         }
 
-        // ============ 7. 联动过滤处理 ============
+        // ============ 联动过滤处理 ============
         // 根据图表联动的过滤条件对数据进行筛选
         List<ChartExtFilterRequest> linkageFilters = chartExtRequest.getLinkageFilters();
         data = handleStoredProcedureLinkage(data, axis, linkageFilters);
 
-        // ============ 8. 分页处理 ============
+        // ============ 分页处理 ============
         // 根据请求的页码和页大小进行分页截取
         Long goPage = chartExtRequest.getGoPage();
         Long pageSize = chartExtRequest.getPageSize();
@@ -3766,7 +3827,8 @@ public class ChartViewService {
             List<ChartViewFieldDTO> xAxisExt,
             List<ChartViewFieldDTO> extStack,
             List<ChartViewFieldDTO> yAxis,
-            ChartViewDTO view) throws Exception {
+            ChartViewDTO view,
+            List<ChartExtFilterRequest> drillFilters) throws Exception {
 
         // 获取插件视图配置和数据表信息
         PluginViewSet pluginViewSet = pluginViewParam.getPluginViewSet();
@@ -3810,7 +3872,7 @@ public class ChartViewService {
 
         // 对存储过程的查询结果进行后处理
         // 包括: 分组聚合、排序、列重排、联动过滤、分页等
-        data = handlePluginStoredProcedureData(data, xAxisForRequest, yAxisForRequest, xAxis, yAxis, view, chartExtRequest);
+        data = handleStoredProcedureData(data, xAxisForRequest, yAxisForRequest, xAxis, yAxis, view, chartExtRequest, drillFilters);
 
         return data;
     }

@@ -706,7 +706,7 @@ public class DataSetTableService {
 
                     // 存储过程调用：直接使用原始SQL，在Java中实现分页
                     datasourceRequest.setQuery(sql);
-                    map.put("sql", java.util.Base64.getEncoder().encodeToString(sql.getBytes()));
+                    map.put("sql", java.util.Base64.getEncoder().encodeToString(sql.getBytes(StandardCharsets.UTF_8)));
                     datasourceRequest.setPage(1);
                     datasourceRequest.setFetchSize(Integer.parseInt(dataSetTableRequest.getRow()));
                     datasourceRequest.setPreviewData(true);
